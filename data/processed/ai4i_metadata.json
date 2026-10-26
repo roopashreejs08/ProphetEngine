@@ -1,0 +1,29 @@
+{
+  "dataset": "AI4I 2020 Predictive Maintenance Dataset",
+  "random_state": 42,
+  "validation_size": 0.2,
+  "target": "Machine failure",
+  "features": [
+    "Air temperature [K]",
+    "Process temperature [K]",
+    "Rotational speed [rpm]",
+    "Torque [Nm]",
+    "Tool wear [min]",
+    "Type_H",
+    "Type_L",
+    "Type_M"
+  ],
+  "excluded_identifiers": [
+    "UDI",
+    "Product ID"
+  ],
+  "excluded_failure_mode_columns": [
+    "TWF",
+    "HDF",
+    "PWF",
+    "OSF",
+    "RNF"
+  ],
+  "train_rows": 8000,
+  "validation_rows": 2000
+}
