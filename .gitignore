@@ -1,0 +1,15 @@
+
+# Python cache and environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# Raw datasets
+data/cmapss/*.txt
+data/ai4i/*.csv
+
+# Notebook temporary files
+.ipynb_checkpoints/
+.DS_Store
