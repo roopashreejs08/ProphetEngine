@@ -8,5 +8,6 @@ jupyter
 joblib
 xgboost
 streamlit
+plotly
 shap
 torch
