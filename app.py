@@ -1376,30 +1376,22 @@ def sensor_sparkline(history, column, label, stats):
     return figure
 
 
-def tile_markup(label, value, sub_lines=None):
-    sub_html = ""
-    if sub_lines:
-        sub_html = "".join(
-            f'<div class="pe-tile-sub">{line}</div>' for line in sub_lines
-        )
-    return f"""
-    <div class="pe-tile">
-        <div class="pe-tile-label">{label}</div>
-        <div class="pe-tile-value">{value}</div>
-        {sub_html}
-    </div>
-    """
-
-
 def render_tile_row(items):
-    tiles = [
-        tile_markup(item[0], item[1], item[2] if len(item) > 2 else None)
-        for item in items
-    ]
-    st.markdown(
-        '<div class="pe-tile-row">' + "".join(tiles) + "</div>",
-        unsafe_allow_html=True,
-    )
+    """Render a row of metric tiles using native Streamlit columns."""
+    cols = st.columns(len(items), gap="small")
+    for col, (label, value, sub_lines) in zip(cols, items):
+        with col:
+            sub_text = "  \n".join(sub_lines) if sub_lines else ""
+            st.markdown(
+                f"""
+                <div class="pe-tile">
+                    <div class="pe-tile-label">{label}</div>
+                    <div class="pe-tile-value">{value}</div>
+                    {f'<div class="pe-tile-sub">{sub_text}</div>' if sub_text else ""}
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
 
 def format_delta(column, current, previous):
