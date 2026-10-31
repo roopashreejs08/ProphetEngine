@@ -1,18 +1,24 @@
 """
 ProphetEngine predictive maintenance console.
 
-Single-file Streamlit app. Every value shown comes from repository artifacts:
+Single-file Streamlit app. Every value shown comes from repository artifacts or
+live inference over repository data:
+- data/processed/ai4i_validation.csv (live scoring fleet)
+- data/processed/ai4i_train.csv (simulator statistics and input ranges)
+- data/live/stream.csv (optional external telemetry feed)
 - results/classical_ml_metrics.csv
 - results/random_forest_feature_importance.csv
 - results/*.joblib
 - results/*_confusion_matrix.png
 - data/processed/ai4i_metadata.json
-- data/processed/ai4i_train.csv (input ranges only)
 
 Run with: streamlit run app.py
 """
 
 import json
+import math
+import time
+from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 
@@ -21,6 +27,14 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from sklearn.metrics import (
+    accuracy_score,
+    average_precision_score,
+    confusion_matrix,
+    f1_score,
+    precision_score,
+    recall_score,
+)
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -31,9 +45,13 @@ RESULTS_DIR = REPO_ROOT / "results"
 
 METADATA_PATH = DATA_DIR / "ai4i_metadata.json"
 TRAIN_PATH = DATA_DIR / "ai4i_train.csv"
+VALIDATION_PATH = DATA_DIR / "ai4i_validation.csv"
 METRICS_PATH = RESULTS_DIR / "classical_ml_metrics.csv"
 IMPORTANCE_PATH = RESULTS_DIR / "random_forest_feature_importance.csv"
+LIVE_DIR = REPO_ROOT / "data" / "live"
+STREAM_PATH = LIVE_DIR / "stream.csv"
 
+PREPROCESS_COMMAND = "python src/data/preprocess_ai4i.py"
 TRAIN_COMMAND = "python src/models/classical_ml.py"
 TUNE_COMMAND = "python src/models/tune_random_forest.py"
 
@@ -59,18 +77,23 @@ FEATURE_COLUMNS = [
     "Type_M",
 ]
 
+TARGET = "Machine failure"
+TUNED_LABEL = "Random Forest (tuned)"
+TUNED_THRESHOLD = 0.23
+DEFAULT_THRESHOLD = 0.5
+
 MODEL_FILES = {
     "Logistic Regression": "logistic_regression.joblib",
     "Decision Tree": "decision_tree.joblib",
     "Random Forest": "random_forest.joblib",
-    "Random Forest (tuned, threshold 0.23)": "random_forest.joblib",
+    TUNED_LABEL: "random_forest.joblib",
 }
 
 MODEL_ORDER = [
     "Logistic Regression",
     "Decision Tree",
     "Random Forest",
-    "Random Forest (tuned, threshold 0.23)",
+    TUNED_LABEL,
 ]
 
 CM_FILES = {
@@ -79,13 +102,46 @@ CM_FILES = {
     "Random Forest": "random_forest_confusion_matrix.png",
 }
 
+MACHINE_TYPES = ["L", "M", "H"]
+
+SENSOR_SHORT = {
+    "Air temperature [K]": "Air temperature",
+    "Process temperature [K]": "Process temperature",
+    "Rotational speed [rpm]": "Rotational speed",
+    "Torque [Nm]": "Torque",
+    "Tool wear [min]": "Tool wear",
+}
+
+STREAM_COLUMNS = [
+    "timestamp",
+    "air_temperature",
+    "process_temperature",
+    "rotational_speed",
+    "torque",
+    "tool_wear",
+    "machine_type",
+]
+
+STREAM_SENSOR_MAP = {
+    "air_temperature": "Air temperature [K]",
+    "process_temperature": "Process temperature [K]",
+    "rotational_speed": "Rotational speed [rpm]",
+    "torque": "Torque [Nm]",
+    "tool_wear": "Tool wear [min]",
+}
+
+STREAM_STALE_SECONDS = 30
+LIVE_HISTORY_LIMIT = 3600
+
+LIVE_SOURCES = ["Simulated engine", "External feed", "Manual"]
+
 PAGES = [
-    "Dashboard",
-    "Failure prediction",
-    "Model comparison",
-    "Feature importance",
+    "Engine health and analytics",
+    "Live prediction",
+    "Model Comparison",
+    "Feature Importance",
     "Confusion matrices",
-    "About and methodology",
+    "About",
 ]
 
 # Palette
@@ -373,6 +429,14 @@ st.markdown(
         font-variant-numeric: tabular-nums;
     }
 
+    .pe-tile-sub {
+        color: var(--muted);
+        font-size: 10px;
+        line-height: 1.5;
+        margin-top: 3px;
+        font-variant-numeric: tabular-nums;
+    }
+
     /* Tables */
     .pe-table-wrap {
         background: var(--card);
@@ -420,6 +484,64 @@ st.markdown(
         color: var(--muted) !important;
     }
 
+    .pe-sensor-cell {
+        font-size: 12px !important;
+        color: var(--muted) !important;
+    }
+
+    .pe-row-selected td {
+        background: rgba(245, 166, 35, 0.08);
+    }
+
+    .pe-verdict-risk {
+        color: var(--red) !important;
+        font-weight: 600;
+    }
+
+    .pe-verdict-safe {
+        color: var(--green) !important;
+        font-weight: 600;
+    }
+
+    .pe-event-raised {
+        color: var(--red) !important;
+        font-weight: 600;
+    }
+
+    .pe-event-cleared {
+        color: var(--green) !important;
+        font-weight: 600;
+    }
+
+    /* Live confusion matrix */
+    .pe-cm th,
+    .pe-cm td {
+        text-align: center;
+        padding: 14px 16px;
+    }
+
+    .pe-cm thead th:first-child {
+        text-align: left;
+    }
+
+    .pe-cm tbody th {
+        color: var(--muted);
+        font-weight: 500;
+        text-align: left;
+        border-bottom: 1px solid var(--border);
+        padding: 14px 16px;
+    }
+
+    .pe-cm-correct {
+        color: var(--green) !important;
+        font-weight: 700;
+    }
+
+    .pe-cm-error {
+        color: var(--red) !important;
+        font-weight: 700;
+    }
+
     /* Empty states */
     .pe-empty {
         background: var(--card);
@@ -452,6 +574,10 @@ st.markdown(
         font-size: 13px;
         overflow-x: auto;
         margin: 0;
+    }
+
+    .pe-empty-compact {
+        padding: 16px 18px;
     }
 
     /* Cards for images and text blocks */
@@ -579,11 +705,47 @@ def load_importance():
 
 
 @st.cache_data
-def load_input_ranges():
-    """Derive form bounds from the training split, as required by the brief."""
+def load_train_frame():
+    """Training split, used for input bounds, percentiles and simulator stats."""
     if not TRAIN_PATH.exists():
         return None
-    train = pd.read_csv(TRAIN_PATH)
+    try:
+        train = pd.read_csv(TRAIN_PATH)
+    except Exception:
+        return None
+    required = FEATURE_COLUMNS + [TARGET]
+    if train.empty or not set(required).issubset(train.columns):
+        return None
+    if not all(pd.api.types.is_numeric_dtype(train[column]) for column in required):
+        return None
+    return train
+
+
+@st.cache_data
+def load_validation():
+    """Validation fleet used for every live score on the first page."""
+    if not VALIDATION_PATH.exists():
+        return None
+    try:
+        validation = pd.read_csv(VALIDATION_PATH)
+    except Exception:
+        return None
+    required = FEATURE_COLUMNS + [TARGET]
+    if validation.empty or not set(required).issubset(validation.columns):
+        return None
+    if not all(
+        pd.api.types.is_numeric_dtype(validation[column]) for column in required
+    ):
+        return None
+    return validation
+
+
+@st.cache_data
+def load_input_ranges():
+    """Derive simulator and manual-input bounds from the training split."""
+    train = load_train_frame()
+    if train is None:
+        return None
     ranges = {}
     for column, _, _, _ in SENSOR_COLUMNS:
         series = pd.to_numeric(train[column], errors="coerce").dropna()
@@ -595,6 +757,105 @@ def load_input_ranges():
             "default": float(series.median()),
         }
     return ranges
+
+
+@st.cache_data
+def load_train_stats():
+    """Statistics that parameterise the simulator, all estimated from training data."""
+    train = load_train_frame()
+    if train is None:
+        return None
+
+    sensors = {}
+    for column, _, _, _ in SENSOR_COLUMNS:
+        series = pd.to_numeric(train[column], errors="coerce").dropna()
+        if series.empty:
+            return None
+        std = float(series.std(ddof=0))
+        sensors[column] = {
+            "min": float(series.min()),
+            "max": float(series.max()),
+            "median": float(series.median()),
+            "mean": float(series.mean()),
+            "std": std if std > 0 else float(series.max() - series.min()) / 4.0,
+            "q25": float(series.quantile(0.25)),
+            "q75": float(series.quantile(0.75)),
+        }
+
+    rpm = train["Rotational speed [rpm]"].to_numpy(dtype=float)
+    torque = train["Torque [Nm]"].to_numpy(dtype=float)
+    slope, intercept = np.polyfit(rpm, torque, 1)
+    residuals = torque - (intercept + slope * rpm)
+
+    offset = (
+        train["Process temperature [K]"] - train["Air temperature [K]"]
+    ).to_numpy(dtype=float)
+
+    failure_wear = train.loc[
+        train[TARGET] == 1, "Tool wear [min]"
+    ].to_numpy(dtype=float)
+    typical_wear_life = float(np.median(failure_wear)) if len(failure_wear) else 0.0
+    if typical_wear_life <= 0:
+        typical_wear_life = sensors["Tool wear [min]"]["max"]
+    wear_range = (
+        sensors["Tool wear [min]"]["max"] - sensors["Tool wear [min]"]["min"]
+    )
+
+    type_stats = {}
+    for machine_type in MACHINE_TYPES:
+        column = f"Type_{machine_type}"
+        subset = train[train[column] == 1]
+        if subset.empty:
+            type_stats[machine_type] = {
+                "count": 0,
+                "rpm_median": sensors["Rotational speed [rpm]"]["median"],
+                "torque_median": sensors["Torque [Nm]"]["median"],
+                "air_median": sensors["Air temperature [K]"]["median"],
+                "wear_median": sensors["Tool wear [min]"]["median"],
+            }
+        else:
+            type_stats[machine_type] = {
+                "count": int(len(subset)),
+                "rpm_median": float(subset["Rotational speed [rpm]"].median()),
+                "torque_median": float(subset["Torque [Nm]"].median()),
+                "air_median": float(subset["Air temperature [K]"].median()),
+                "wear_median": float(subset["Tool wear [min]"].median()),
+            }
+
+    return {
+        "rows": int(len(train)),
+        "sensors": sensors,
+        "air_process_offset_mean": float(np.mean(offset)),
+        "air_process_offset_std": float(np.std(offset, ddof=0)),
+        "torque_rpm_slope": float(slope),
+        "torque_rpm_intercept": float(intercept),
+        "torque_residual_std": float(np.std(residuals, ddof=0)),
+        "rpm_torque_correlation": float(np.corrcoef(rpm, torque)[0, 1]),
+        "type_stats": type_stats,
+        "typical_wear_life": float(typical_wear_life),
+        "wear_increment": float(wear_range / max(1.0, typical_wear_life)),
+        "failure_rate": float(train[TARGET].mean()),
+    }
+
+
+@st.cache_data
+def cached_validation_probabilities(model_label):
+    """Cache validation probabilities per model. Threshold is deliberately absent."""
+    validation = load_validation()
+    if validation is None:
+        return {"probabilities": None, "error": "validation_missing"}
+    filename = MODEL_FILES.get(model_label)
+    if filename is None or not (RESULTS_DIR / filename).exists():
+        return {"probabilities": None, "error": "model_missing"}
+    try:
+        model = load_model(filename)
+        probabilities = model.predict_proba(validation[FEATURE_COLUMNS])[:, 1]
+    except Exception:
+        return {"probabilities": None, "error": "model_failed"}
+    return {
+        "probabilities": np.asarray(probabilities, dtype=float),
+        "error": None,
+    }
 
 
 @st.cache_resource
@@ -689,19 +950,36 @@ def format_metric(column, value):
 
 
 def build_metrics_with_tuned(metrics):
-    tuned = pd.DataFrame(
-        [
-            {
-                "Model": "Random Forest (tuned, threshold 0.23)",
-                "Accuracy": 0.9745,
-                "Precision": np.nan,
-                "Recall": 0.7353,
-                "F1-score": np.nan,
-                "Average Precision (PR-AUC)": np.nan,
-                "ROC-AUC": np.nan,
-            }
-        ]
-    )
+    """Saved rows plus the tuned row recomputed live from validation data."""
+    tuned_result = cached_validation_probabilities(TUNED_LABEL)
+    tuned_values = {
+        "Accuracy": np.nan,
+        "Precision": np.nan,
+        "Recall": np.nan,
+        "F1-score": np.nan,
+        "Average Precision (PR-AUC)": np.nan,
+        "ROC-AUC": np.nan,
+    }
+    if tuned_result["error"] is None:
+        validation = load_validation()
+        if validation is not None:
+            probabilities = tuned_result["probabilities"]
+            y_true = validation[TARGET].to_numpy(dtype=int)
+            y_pred = (probabilities >= TUNED_THRESHOLD).astype(int)
+            tuned_values.update(
+                {
+                    "Accuracy": float(accuracy_score(y_true, y_pred)),
+                    "Precision": float(
+                        precision_score(y_true, y_pred, zero_division=0)
+                    ),
+                    "Recall": float(recall_score(y_true, y_pred, zero_division=0)),
+                    "F1-score": float(f1_score(y_true, y_pred, zero_division=0)),
+                    "Average Precision (PR-AUC)": float(
+                        average_precision_score(y_true, probabilities)
+                    ),
+                }
+            )
+    tuned = pd.DataFrame([{"Model": TUNED_LABEL, **tuned_values}])
     combined = pd.concat([metrics, tuned], ignore_index=True)
     combined["Model"] = pd.Categorical(
         combined["Model"], categories=MODEL_ORDER, ordered=True
@@ -873,6 +1151,945 @@ def build_input_frame(values, machine_type):
     return pd.DataFrame([row], columns=FEATURE_COLUMNS)
 
 
+def model_path(model_label):
+    return RESULTS_DIR / MODEL_FILES[model_label]
+
+
+def init_shared_scoring_state():
+    """Shared model and threshold, kept in session state across pages."""
+    if st.session_state.get("pe_model") not in MODEL_ORDER:
+        st.session_state["pe_model"] = "Random Forest"
+    if "pe_threshold" not in st.session_state:
+        st.session_state["pe_threshold"] = (
+            TUNED_THRESHOLD
+            if st.session_state["pe_model"] == TUNED_LABEL
+            else DEFAULT_THRESHOLD
+        )
+
+
+def on_model_change():
+    selected = st.session_state.get("pe_model", "Random Forest")
+    st.session_state["pe_threshold"] = (
+        TUNED_THRESHOLD if selected == TUNED_LABEL else DEFAULT_THRESHOLD
+    )
+
+
+def machine_type_series(frame):
+    """Recover L/M/H from one-hot columns without inventing a type."""
+    result = pd.Series("M", index=frame.index, dtype=object)
+    result.loc[frame["Type_L"] == 1] = "L"
+    result.loc[frame["Type_H"] == 1] = "H"
+    return result
+
+
+def live_performance(y_true, probabilities, threshold):
+    y_pred = (probabilities >= threshold).astype(int)
+    matrix = confusion_matrix(y_true, y_pred, labels=[0, 1])
+    tn, fp, fn, tp = matrix.ravel()
+    metrics = {
+        "accuracy": float(accuracy_score(y_true, y_pred)),
+        "precision": float(precision_score(y_true, y_pred, zero_division=0)),
+        "recall": float(recall_score(y_true, y_pred, zero_division=0)),
+        "f1": float(f1_score(y_true, y_pred, zero_division=0)),
+        "pr_auc": float(average_precision_score(y_true, probabilities)),
+        "tn": int(tn),
+        "fp": int(fp),
+        "fn": int(fn),
+        "tp": int(tp),
+        "actual_failures": int(np.sum(y_true == 1)),
+    }
+    return metrics
+
+
+def failure_sentence(metrics, threshold):
+    failures = metrics["actual_failures"]
+    false_alarms = metrics["fp"]
+    failure_word = "failure" if failures == 1 else "failures"
+    alarm_word = "false alarm" if false_alarms == 1 else "false alarms"
+    return (
+        f"At threshold {threshold:.2f} the model catches {metrics['tp']} of "
+        f"{failures} actual {failure_word} and raises {false_alarms} {alarm_word}."
+    )
+
+
+def confusion_matrix_html(tn, fp, fn, tp):
+    return f"""
+    <div class="pe-table-wrap pe-cm-wrap">
+        <table class="pe-table pe-cm">
+            <thead>
+                <tr>
+                    <th>Live counts</th>
+                    <th>Predicted healthy</th>
+                    <th>Predicted failure</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <th>Actual healthy</th>
+                    <td>{tn:,}</td>
+                    <td class="pe-cm-error">{fp:,}</td>
+                </tr>
+                <tr>
+                    <th>Actual failure</th>
+                    <td class="pe-cm-error">{fn:,}</td>
+                    <td class="pe-cm-correct">{tp:,}</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+    """
+
+
+def gauge_figure(probability, threshold):
+    alerted = probability >= threshold
+    figure = go.Figure(
+        go.Indicator(
+            mode="gauge+number",
+            value=float(probability),
+            number={
+                "valueformat": ".3f",
+                "font": {"color": TEXT, "size": 36, "family": CHART_FONT},
+            },
+            gauge={
+                "axis": {
+                    "range": [0, 1],
+                    "tickformat": ".0%",
+                    "tickcolor": MUTED,
+                    "tickfont": {"color": MUTED, "size": 10},
+                },
+                "bar": {"color": RED if alerted else GREEN, "thickness": 0.32},
+                "bgcolor": CARD,
+                "borderwidth": 0,
+                "steps": [
+                    {"range": [0, threshold], "color": "rgba(63,185,80,0.12)"},
+                    {"range": [threshold, 1], "color": "rgba(248,81,73,0.12)"},
+                ],
+                "threshold": {
+                    "line": {"color": AMBER, "width": 3},
+                    "thickness": 0.82,
+                    "value": float(threshold),
+                },
+            },
+            title={
+                "text": "Failure probability gauge",
+                "font": {"size": 14, "color": MUTED, "family": CHART_FONT},
+            },
+        )
+    )
+    figure.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font={"family": CHART_FONT, "color": TEXT},
+        height=250,
+        margin={"l": 24, "r": 24, "t": 56, "b": 16},
+    )
+    return figure
+
+
+def probability_history_figure(history, model_label, threshold):
+    points = [
+        (reading["timestamp"], reading["probabilities"][model_label])
+        for reading in history
+        if reading["probabilities"].get(model_label) is not None
+    ][-60:]
+    figure = go.Figure()
+    if points:
+        times = [item[0] for item in points]
+        values = [item[1] for item in points]
+        figure.add_trace(
+            go.Scatter(
+                x=times,
+                y=values,
+                mode="lines+markers",
+                line={"color": AMBER, "width": 2},
+                marker={"size": 4, "color": AMBER},
+                hovertemplate="%{x|%H:%M:%S} UTC<br>probability %{y:.3f}<extra></extra>",
+                name="Failure probability",
+            )
+        )
+    figure.add_hline(
+        y=threshold,
+        line={"color": RED, "width": 1.5, "dash": "dot"},
+        annotation_text=f"threshold {threshold:.2f}",
+        annotation_position="top left",
+        annotation_font={"color": MUTED, "size": 11},
+    )
+    figure.update_layout(
+        **base_layout(f"{model_label} probability, last 60 ticks")
+    )
+    figure.update_layout(
+        height=300,
+        showlegend=False,
+        xaxis={
+            "gridcolor": "rgba(0,0,0,0)",
+            "tickfont": {"color": MUTED, "size": 10},
+            "tickformat": "%H:%M:%S",
+        },
+        yaxis={
+            "range": [0, 1],
+            "tickformat": ".0%",
+            "gridcolor": BORDER,
+            "zeroline": False,
+            "tickfont": {"color": MUTED, "size": 10},
+        },
+    )
+    return figure
+
+
+def sensor_sparkline(history, column, label, stats):
+    points = [
+        (reading["timestamp"], reading["sensors"][column])
+        for reading in history
+        if column in reading["sensors"]
+    ][-60:]
+    figure = go.Figure()
+    if points:
+        figure.add_trace(
+            go.Scatter(
+                x=[item[0] for item in points],
+                y=[item[1] for item in points],
+                mode="lines",
+                line={"color": AMBER, "width": 2},
+                hovertemplate="%{x|%H:%M:%S} UTC<br>%{y}<extra></extra>",
+            )
+        )
+    figure.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font={"family": CHART_FONT, "size": 10, "color": MUTED},
+        height=130,
+        margin={"l": 8, "r": 8, "t": 30, "b": 8},
+        title={
+            "text": label,
+            "font": {"size": 11, "color": MUTED},
+            "x": 0,
+            "xanchor": "left",
+        },
+        showlegend=False,
+        xaxis={"visible": False},
+        yaxis={
+            "gridcolor": BORDER,
+            "zeroline": False,
+            "showticklabels": False,
+        },
+    )
+    return figure
+
+
+def tile_markup(label, value, sub_lines=None):
+    sub_html = ""
+    if sub_lines:
+        sub_html = "".join(
+            f'<div class="pe-tile-sub">{line}</div>' for line in sub_lines
+        )
+    return f"""
+    <div class="pe-tile">
+        <div class="pe-tile-label">{label}</div>
+        <div class="pe-tile-value">{value}</div>
+        {sub_html}
+    </div>
+    """
+
+
+def render_tile_row(items):
+    tiles = [
+        tile_markup(item[0], item[1], item[2] if len(item) > 2 else None)
+        for item in items
+    ]
+    st.markdown(
+        '<div class="pe-tile-row">' + "".join(tiles) + "</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def format_delta(column, current, previous):
+    if previous is None:
+        return "First reading"
+    delta = float(current) - float(previous)
+    units = {
+        "Air temperature [K]": ("K", 1),
+        "Process temperature [K]": ("K", 1),
+        "Rotational speed [rpm]": ("rpm", 0),
+        "Torque [Nm]": ("Nm", 1),
+        "Tool wear [min]": ("min", 0),
+    }
+    unit, digits = units.get(column, ("", 2))
+    if abs(delta) < (0.05 if digits == 1 else 0.5):
+        return "No change vs previous"
+    sign = "+" if delta > 0 else "-"
+    return f"{sign}{abs(delta):,.{digits}f} {unit} vs previous".strip()
+
+
+def training_percentile(train, column, value):
+    if train is None or column not in train:
+        return None
+    series = pd.to_numeric(train[column], errors="coerce").dropna()
+    if series.empty:
+        return None
+    return float((series <= value).mean() * 100.0)
+
+
+def percentile_label(percentile):
+    if percentile is None:
+        return "Training percentile unavailable"
+    return f"P{percentile:.0f} vs training readings"
+
+
+def predict_all_models(feature_frame):
+    """Run live inference for every label. Returns probabilities and real latency."""
+    probabilities = {}
+    errors = {}
+    start = time.perf_counter()
+    for label in MODEL_ORDER:
+        path = model_path(label)
+        if not path.exists():
+            probabilities[label] = None
+            errors[label] = "model file missing"
+            continue
+        try:
+            model = load_model(MODEL_FILES[label])
+            probabilities[label] = float(
+                model.predict_proba(feature_frame)[0, 1]
+            )
+        except Exception:
+            probabilities[label] = None
+            errors[label] = "model could not be scored"
+    elapsed_ms = (time.perf_counter() - start) * 1000.0
+    return probabilities, elapsed_ms, errors
+
+
+def score_reading(sensors, machine_type, source, timestamp=None):
+    feature_frame = build_input_frame(sensors, machine_type)
+    probabilities, elapsed_ms, errors = predict_all_models(feature_frame)
+    return {
+        "timestamp": timestamp or datetime.now(timezone.utc),
+        "sensors": dict(sensors),
+        "machine_type": machine_type,
+        "probabilities": probabilities,
+        "inference_ms": float(elapsed_ms),
+        "model_errors": errors,
+        "source": source,
+    }
+
+
+def append_history(key, reading):
+    history = st.session_state.setdefault(key, [])
+    history.append(reading)
+    if len(history) > LIVE_HISTORY_LIMIT:
+        history = history[-LIVE_HISTORY_LIMIT:]
+    st.session_state[key] = history
+
+
+def derive_alert_events(history, model_label, threshold):
+    events = []
+    previously_flagged = False
+    for reading in history:
+        probability = reading["probabilities"].get(model_label)
+        if probability is None:
+            continue
+        flagged = probability >= threshold
+        if flagged != previously_flagged:
+            events.append(
+                {
+                    "timestamp": reading["timestamp"],
+                    "action": "raised" if flagged else "cleared",
+                    "probability": probability,
+                    "sensors": reading["sensors"],
+                    "machine_type": reading["machine_type"],
+                }
+            )
+        previously_flagged = flagged
+    return events
+
+
+def human_age(seconds):
+    seconds = max(0.0, float(seconds))
+    if seconds < 60:
+        return f"{seconds:.0f} s"
+    if seconds < 3600:
+        return f"{seconds / 60.0:.1f} min"
+    return f"{seconds / 3600.0:.1f} h"
+
+
+def live_narrative(history, model_label, stats):
+    points = [
+        reading
+        for reading in history
+        if reading["probabilities"].get(model_label) is not None
+    ][-10:]
+    if not points:
+        return (
+            "No probability is available yet for the selected model. "
+            "Check the model artifacts before reading the stream."
+        )
+    latest = points[-1]
+    probability = latest["probabilities"][model_label]
+    if len(points) == 1:
+        sensor_column = "Torque [Nm]"
+        return (
+            f"First reading: failure probability is {probability:.2f} and "
+            f"{SENSOR_SHORT[sensor_column].lower()} is "
+            f"{format_sensor(sensor_column, latest['sensors'][sensor_column])}."
+        )
+
+    first = points[0]
+    window = len(points)
+    change = probability - first["probabilities"][model_label]
+
+    sensor_changes = []
+    for column, _, _, _ in SENSOR_COLUMNS:
+        series = stats["sensors"][column]
+        scale = series["std"] if series["std"] > 0 else 1.0
+        delta = latest["sensors"][column] - first["sensors"][column]
+        sensor_changes.append((abs(delta) / scale, delta, column))
+    _, sensor_delta, sensor_column = max(sensor_changes, key=lambda item: item[0])
+
+    if abs(sensor_delta) > 1e-9:
+        sensor_verb = "climbed" if sensor_delta > 0 else "dropped"
+        sensor_phrase = (
+            f"{SENSOR_SHORT[sensor_column].lower()} {sensor_verb} to "
+            f"{format_sensor(sensor_column, latest['sensors'][sensor_column])}"
+        )
+    else:
+        sensor_phrase = (
+            f"{SENSOR_SHORT[sensor_column].lower()} is "
+            f"{format_sensor(sensor_column, latest['sensors'][sensor_column])}"
+        )
+
+    if change > 0.005:
+        trend = f"rose from {first['probabilities'][model_label]:.2f} to {probability:.2f}"
+    elif change < -0.005:
+        trend = f"fell from {first['probabilities'][model_label]:.2f} to {probability:.2f}"
+    else:
+        trend = f"held near {probability:.2f}"
+
+    return (
+        f"Failure probability {trend} over the last {window} readings "
+        f"as {sensor_phrase}."
+    )
+
+
+def render_live_model_table(history, model_label, threshold):
+    latest = history[-1] if history else None
+    rows = []
+    for label in MODEL_ORDER:
+        probability = (
+            latest["probabilities"].get(label) if latest is not None else None
+        )
+        if probability is None:
+            cells = (
+                f"<td>{label}</td>"
+                '<td class="pe-muted-cell">not available</td>'
+                '<td class="pe-muted-cell">not scored</td>'
+            )
+            rows.append(f"<tr>{cells}</tr>")
+            continue
+        verdict = "Failure risk" if probability >= threshold else "Healthy"
+        verdict_class = "pe-verdict-risk" if verdict == "Failure risk" else "pe-verdict-safe"
+        selected_class = "pe-row-selected" if label == model_label else ""
+        rows.append(
+            f'<tr class="{selected_class}">'
+            f"<td>{label}</td>"
+            f"<td>{format_percent(probability, 2)}</td>"
+            f'<td class="{verdict_class}">{verdict}</td>'
+            "</tr>"
+        )
+    st.markdown(
+        f"""
+        <div class="pe-table-wrap">
+            <table class="pe-table">
+                <thead>
+                    <tr><th>Model</th><th>Probability</th><th>Verdict</th></tr>
+                </thead>
+                <tbody>{''.join(rows)}</tbody>
+            </table>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_alert_log(events):
+    if not events:
+        st.markdown(
+            '<div class="pe-empty pe-empty-compact">'
+            '<div class="pe-empty-title">No alerts at the current threshold</div>'
+            '<div class="pe-empty-body">The selected model has not crossed the '
+            "threshold in the retained stream.</div></div>",
+            unsafe_allow_html=True,
+        )
+        return
+    rows = []
+    for event in reversed(events[-20:]):
+        action = event["action"]
+        action_class = "pe-event-raised" if action == "raised" else "pe-event-cleared"
+        sensors = " | ".join(
+            format_sensor(column, event["sensors"][column])
+            for column, _, _, _ in SENSOR_COLUMNS
+        )
+        rows.append(
+            "<tr>"
+            f"<td>{event['timestamp'].strftime('%H:%M:%S')} UTC</td>"
+            f'<td class="{action_class}">{action}</td>'
+            f"<td>{format_percent(event['probability'], 2)}</td>"
+            f"<td>{event['machine_type']}</td>"
+            f"<td class=\"pe-sensor-cell\">{sensors}</td>"
+            "</tr>"
+        )
+    st.markdown(
+        f"""
+        <div class="pe-table-wrap">
+            <table class="pe-table">
+                <thead>
+                    <tr><th>Time</th><th>Event</th><th>Probability</th>
+                    <th>Type</th><th>Sensors</th></tr>
+                </thead>
+                <tbody>{''.join(rows)}</tbody>
+            </table>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_live_panel(
+    history,
+    model_label,
+    threshold,
+    stats,
+    train_frame,
+    total_ticks,
+):
+    if not history:
+        st.markdown(
+            '<div class="pe-empty"><div class="pe-empty-title">Waiting for telemetry</div>'
+            '<div class="pe-empty-body">Start the simulator, append a valid row to the '
+            "external feed, or move a manual control to create the first reading.</div></div>",
+            unsafe_allow_html=True,
+        )
+        return
+
+    latest = history[-1]
+    probability = latest["probabilities"].get(model_label)
+    events = derive_alert_events(history, model_label, threshold)
+    raised_events = [event for event in events if event["action"] == "raised"]
+    if raised_events:
+        last_alert_age = (
+            datetime.now(timezone.utc) - raised_events[-1]["timestamp"]
+        ).total_seconds()
+        last_alert_text = human_age(last_alert_age)
+    else:
+        last_alert_text = "No alerts yet"
+    inference_values = [
+        reading["inference_ms"] for reading in history if reading["inference_ms"] is not None
+    ]
+    average_inference = (
+        float(np.mean(inference_values)) if inference_values else None
+    )
+
+    status_col, gauge_col = st.columns([1.2, 1], gap="large")
+    with status_col:
+        if probability is None:
+            st.markdown(
+                '<div class="pe-banner pe-banner-risk">'
+                '<div class="pe-banner-title">Model unavailable</div>'
+                '<div class="pe-banner-body">The selected model has no probability '
+                "for this reading. Generate the model artifacts and reload.</div></div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            flagged = probability >= threshold
+            banner_class = "pe-banner-risk" if flagged else "pe-banner-safe"
+            title = "Failure risk" if flagged else "Healthy"
+            st.markdown(
+                f"""
+                <div class="pe-banner {banner_class}">
+                    <div class="pe-banner-title">{title}</div>
+                    <div class="pe-banner-body">
+                        Failure probability {probability:.3f} with threshold
+                        {threshold:.2f} for {model_label}.
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        st.markdown(
+            f"**{live_narrative(history, model_label, stats)}**"
+        )
+
+    with gauge_col:
+        if probability is None:
+            st.markdown(
+                '<div class="pe-empty pe-empty-compact">'
+                '<div class="pe-empty-title">No gauge reading</div>'
+                '<div class="pe-empty-body">The selected model is not available.</div>'
+                "</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.plotly_chart(
+                gauge_figure(probability, threshold),
+                width="stretch",
+                config={"displayModeBar": False},
+                key="live_gauge",
+            )
+
+    render_tile_row(
+        [
+            ("Ticks processed", f"{total_ticks:,}", ["Current stream"]),
+            ("Alerts raised", f"{len(raised_events):,}", ["At current threshold"]),
+            ("Since last alert", last_alert_text, ["Raised alerts only"]),
+            (
+                "Average inference",
+                f"{average_inference:.2f} ms" if average_inference is not None else "n/a",
+                ["All four models per tick"],
+            ),
+        ]
+    )
+
+    chart_col, table_col = st.columns([1.45, 1], gap="large")
+    with chart_col:
+        st.markdown("### Rolling failure probability")
+        st.plotly_chart(
+            probability_history_figure(history, model_label, threshold),
+            width="stretch",
+            config={"displayModeBar": False},
+            key="live_probability_history",
+        )
+    with table_col:
+        st.markdown("### Model probabilities")
+        render_live_model_table(history, model_label, threshold)
+        st.caption(
+            "The shared threshold applies to all four rows; the tuned label defaults "
+            "to 0.23. Values are live predict_proba outputs for this reading."
+        )
+
+    st.markdown("### Sensor trends")
+    spark_columns = st.columns(5)
+    for target, (column, label, _, _) in zip(spark_columns, SENSOR_COLUMNS):
+        with target:
+            st.plotly_chart(
+                sensor_sparkline(history, column, label, stats),
+                width="stretch",
+                config={"displayModeBar": False},
+                key=f"spark_{column}",
+            )
+
+    st.markdown("### Current readings")
+    previous = history[-2] if len(history) > 1 else None
+    items = []
+    for column, _, _, _ in SENSOR_COLUMNS:
+        value = latest["sensors"][column]
+        delta_text = format_delta(
+            column, value, previous["sensors"][column] if previous else None
+        )
+        percentile = training_percentile(train_frame, column, value)
+        items.append(
+            (
+                SENSOR_SHORT[column],
+                format_sensor(column, value),
+                [delta_text, percentile_label(percentile)],
+            )
+        )
+    render_tile_row(items)
+    st.caption(
+        "Percentiles compare the current reading with every row of "
+        "data/processed/ai4i_train.csv."
+    )
+
+    st.markdown("### Alert log, last 20 threshold crossings")
+    render_alert_log(events)
+
+
+def empty_stream_state(title, body, stale_note=None):
+    header = ",".join(STREAM_COLUMNS)
+    lines = [
+        "mkdir -p data/live",
+        f"printf '{header}\\n' > data/live/stream.csv",
+    ]
+    if stale_note:
+        body = f"{body} {stale_note}"
+    empty_state(title, body, lines)
+
+
+def parse_stream_csv(path):
+    if not path.exists():
+        return {
+            "status": "missing",
+            "frame": None,
+            "warnings": [],
+            "newest": None,
+        }
+    try:
+        raw = pd.read_csv(path, dtype=str, keep_default_na=False)
+    except pd.errors.EmptyDataError:
+        return {
+            "status": "empty",
+            "frame": None,
+            "warnings": [],
+            "newest": None,
+        }
+    except Exception:
+        return {
+            "status": "unreadable",
+            "frame": None,
+            "warnings": [],
+            "newest": None,
+        }
+
+    raw.columns = [str(column).strip() for column in raw.columns]
+    if len(set(raw.columns)) != len(raw.columns):
+        return {
+            "status": "invalid_columns",
+            "frame": None,
+            "warnings": ["Duplicate column names are not allowed."],
+            "newest": None,
+        }
+    missing = [column for column in STREAM_COLUMNS if column not in raw.columns]
+    extra = [column for column in raw.columns if column not in STREAM_COLUMNS]
+    if missing or extra:
+        warnings = []
+        if missing:
+            warnings.append("Missing columns: " + ", ".join(missing))
+        if extra:
+            warnings.append("Unexpected columns: " + ", ".join(extra))
+        return {
+            "status": "invalid_columns",
+            "frame": None,
+            "warnings": warnings,
+            "newest": None,
+        }
+    if raw.empty:
+        return {
+            "status": "empty",
+            "frame": None,
+            "warnings": [],
+            "newest": None,
+        }
+
+    timestamps = pd.to_datetime(raw["timestamp"], errors="coerce", utc=True)
+    numeric = {}
+    for column in STREAM_SENSOR_MAP:
+        numeric[column] = pd.to_numeric(raw[column], errors="coerce")
+    machine_type = raw["machine_type"].astype(str).str.strip().str.upper()
+
+    valid = timestamps.notna()
+    for column in STREAM_SENSOR_MAP:
+        valid = valid & np.isfinite(numeric[column].to_numpy(dtype=float))
+    valid = valid & machine_type.isin(MACHINE_TYPES)
+
+    warnings = []
+    invalid_count = int((~valid).sum())
+    if invalid_count:
+        bad_rows = ", ".join(
+            str(index + 2) for index in raw.index[~valid][:8]
+        )
+        warnings.append(
+            f"Skipped {invalid_count} malformed row(s). CSV row numbers: {bad_rows}"
+            + (" ..." if invalid_count > 8 else "")
+        )
+
+    if not valid.any():
+        return {
+            "status": "no_valid_rows",
+            "frame": None,
+            "warnings": warnings,
+            "newest": None,
+        }
+
+    frame = pd.DataFrame(
+        {
+            "timestamp": timestamps[valid],
+            "machine_type": machine_type[valid],
+        }
+    )
+    for column, target_column in STREAM_SENSOR_MAP.items():
+        frame[target_column] = numeric[column][valid].astype(float)
+    frame = frame.reset_index(drop=True)
+    return {
+        "status": "ok",
+        "frame": frame,
+        "warnings": warnings,
+        "newest": frame["timestamp"].max(),
+    }
+
+
+def new_sim_state(stats, start_wear, machine_type="M", running=True):
+    sensors = stats["sensors"]
+    type_stat = stats["type_stats"][machine_type]
+    wear = float(
+        np.clip(
+            start_wear,
+            sensors["Tool wear [min]"]["min"],
+            sensors["Tool wear [min]"]["max"],
+        )
+    )
+    air = float(type_stat["air_median"])
+    process = float(
+        np.clip(
+            air + stats["air_process_offset_mean"],
+            sensors["Process temperature [K]"]["min"],
+            sensors["Process temperature [K]"]["max"],
+        )
+    )
+    rpm = float(
+        np.clip(
+            type_stat["rpm_median"],
+            sensors["Rotational speed [rpm]"]["min"],
+            sensors["Rotational speed [rpm]"]["max"],
+        )
+    )
+    torque = float(
+        np.clip(
+            stats["torque_rpm_intercept"] + stats["torque_rpm_slope"] * rpm,
+            sensors["Torque [Nm]"]["min"],
+            sensors["Torque [Nm]"]["max"],
+        )
+    )
+    return {
+        "running": bool(running),
+        "speed": 1.0,
+        "machine_type": machine_type,
+        "start_wear": float(start_wear),
+        "wear": wear,
+        "air": air,
+        "process": process,
+        "rpm": rpm,
+        "torque": torque,
+        "faults": [],
+        "fault_air": 0.0,
+        "fault_process": 0.0,
+        "fault_torque": 0.0,
+        "fault_rpm": 0.0,
+        "rng": np.random.default_rng(42),
+        "last_tick_wall": 0.0,
+        "tick": 0,
+    }
+
+
+def apply_sim_fault(sim, fault, stats):
+    sensors = stats["sensors"]
+    if fault in sim["faults"]:
+        return
+    torque_max = sensors["Torque [Nm]"]["max"]
+    rpm_step = sensors["Rotational speed [rpm]"]["std"]
+    wear_max = sensors["Tool wear [min]"]["max"]
+
+    if fault == "overload":
+        sim["fault_air"] += 1.0 * sensors["Air temperature [K]"]["std"]
+        sim["fault_process"] += 1.0 * sensors["Process temperature [K]"]["std"]
+        sim["fault_torque"] = torque_max
+        sim["fault_rpm"] -= 1.0 * rpm_step
+        sim["wear"] = wear_max
+    elif fault == "overheat":
+        sim["fault_air"] += 2.5 * sensors["Air temperature [K]"]["std"]
+        sim["fault_process"] += 2.5 * sensors["Process temperature [K]"]["std"]
+        sim["fault_torque"] = torque_max
+        sim["fault_rpm"] -= 1.0 * rpm_step
+        sim["wear"] = wear_max
+    elif fault == "accelerate_wear":
+        sim["fault_air"] += 1.0 * sensors["Air temperature [K]"]["std"]
+        sim["fault_process"] += 1.0 * sensors["Process temperature [K]"]["std"]
+        sim["wear"] = wear_max
+        sim["fault_torque"] = torque_max
+        sim["fault_rpm"] -= 1.0 * rpm_step
+    sim["faults"].append(fault)
+
+
+def clear_sim_faults(sim):
+    sim["faults"] = []
+    sim["fault_air"] = 0.0
+    sim["fault_process"] = 0.0
+    sim["fault_torque"] = 0.0
+    sim["fault_rpm"] = 0.0
+
+
+def simulate_next_reading(sim, stats):
+    sensors = stats["sensors"]
+    rng = sim["rng"]
+    speed = float(sim["speed"])
+    machine_type = sim["machine_type"]
+    type_stat = stats["type_stats"][machine_type]
+
+    air_stats = sensors["Air temperature [K]"]
+    air = sim["air"] + rng.normal(
+        0.0, air_stats["std"] * 0.03 * speed
+    ) + 0.02 * (air_stats["median"] - sim["air"])
+    sim["air"] = float(
+        np.clip(air, air_stats["min"], air_stats["max"])
+    )
+
+    offset = stats["air_process_offset_mean"] + rng.normal(
+        0.0, stats["air_process_offset_std"] * 0.3
+    )
+    process_stats = sensors["Process temperature [K]"]
+    sim["process"] = float(
+        np.clip(
+            sim["air"] + offset, process_stats["min"], process_stats["max"]
+        )
+    )
+
+    rpm_stats = sensors["Rotational speed [rpm]"]
+    rpm = sim["rpm"] + rng.normal(
+        0.0, rpm_stats["std"] * 0.01 * speed
+    ) + 0.05 * (type_stat["rpm_median"] - sim["rpm"])
+    sim["rpm"] = float(np.clip(rpm, rpm_stats["min"], rpm_stats["max"]))
+
+    torque_stats = sensors["Torque [Nm]"]
+    torque = (
+        stats["torque_rpm_intercept"]
+        + stats["torque_rpm_slope"] * sim["rpm"]
+        + rng.normal(0.0, stats["torque_residual_std"] * 0.2 * speed)
+    )
+    sim["torque"] = float(
+        np.clip(torque, torque_stats["min"], torque_stats["max"])
+    )
+
+    wear_stats = sensors["Tool wear [min]"]
+    sim["wear"] = float(
+        min(
+            wear_stats["max"],
+            sim["wear"] + stats["wear_increment"] * speed,
+        )
+    )
+    sim["tick"] += 1
+
+    values = {
+        "Air temperature [K]": float(
+            np.clip(
+                sim["air"] + sim["fault_air"],
+                air_stats["min"],
+                air_stats["max"],
+            )
+        ),
+        "Process temperature [K]": float(
+            np.clip(
+                sim["process"] + sim["fault_process"],
+                process_stats["min"],
+                process_stats["max"],
+            )
+        ),
+        "Rotational speed [rpm]": float(
+            np.clip(
+                sim["rpm"] + sim["fault_rpm"],
+                rpm_stats["min"],
+                rpm_stats["max"],
+            )
+        ),
+        "Torque [Nm]": float(
+            np.clip(
+                sim["torque"] + sim["fault_torque"],
+                torque_stats["min"],
+                torque_stats["max"],
+            )
+        ),
+        "Tool wear [min]": float(
+            np.clip(sim["wear"], wear_stats["min"], wear_stats["max"])
+        ),
+    }
+    return values, machine_type
+
+
 # ---------------------------------------------------------------------------
 # Shared data
 # ---------------------------------------------------------------------------
@@ -880,10 +2097,11 @@ metadata = load_metadata()
 metrics = load_metrics()
 importance = load_importance()
 input_ranges = load_input_ranges()
+train_frame = load_train_frame()
+train_stats = load_train_stats()
+validation_frame = load_validation()
 
-train_rows = metadata["train_rows"] if metadata else 8000
-validation_rows = metadata["validation_rows"] if metadata else 2000
-seed = metadata["random_state"] if metadata else 42
+init_shared_scoring_state()
 
 # ---------------------------------------------------------------------------
 # Sidebar navigation
@@ -898,6 +2116,37 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown(
+        '<div class="pe-side-sub" style="margin-bottom:8px;">Scoring controls</div>',
+        unsafe_allow_html=True,
+    )
+    st.selectbox(
+        "Model",
+        MODEL_ORDER,
+        key="pe_model",
+        on_change=on_model_change,
+        help=(
+            "The tuned label reuses random_forest.joblib with its 0.23 "
+            "default threshold. Used by Engine health and Live prediction."
+        ),
+    )
+    st.slider(
+        "Failure threshold",
+        min_value=0.05,
+        max_value=0.95,
+        step=0.01,
+        key="pe_threshold",
+        help=(
+            "A reading is flagged when its failure probability is at or "
+            "above this threshold. Used by Engine health and Live prediction."
+        ),
+    )
+    st.caption(
+        f"Active: {st.session_state['pe_model']} at "
+        f"{st.session_state['pe_threshold']:.2f}."
+    )
+
+    st.markdown("---")
+    st.markdown(
         """
         <div class="pe-side-foot">
             <div>roopashreejs08/ProphetEngine</div>
@@ -909,328 +2158,879 @@ with st.sidebar:
     )
 
 # ===========================================================================
-# Dashboard
+# Engine health and analytics
 # ===========================================================================
-if page == "Dashboard":
+if page == "Engine health and analytics":
     render_header()
-    st.markdown("## Dashboard")
+    st.markdown("## Engine health and analytics")
 
-    if metrics is None:
-        empty_state(
-            "Metrics file not found",
-            "results/classical_ml_metrics.csv is missing, so no model results can be shown. "
-            "Run the training script, then reload this page.",
-            [TRAIN_COMMAND],
+    if validation_frame is not None:
+        fleet_label = (
+            "Validation fleet (historical records, "
+            f"{len(validation_frame):,} machines)"
         )
     else:
-        best_accuracy = metrics.loc[metrics["Accuracy"].idxmax()]
-        best_pr_auc = metrics.loc[metrics["Average Precision (PR-AUC)"].idxmax()]
-
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            metric_card(
-                "Best accuracy",
-                format_percent(best_accuracy["Accuracy"]),
-                f"{best_accuracy['Model']}, validation set",
-            )
-        with col2:
-            metric_card(
-                "Best PR-AUC",
-                f"{best_pr_auc['Average Precision (PR-AUC)']:.4f}",
-                f"{best_pr_auc['Model']}, validation set",
-            )
-        with col3:
-            metric_card(
-                "Tuned RF recall",
-                "73.53%",
-                "Threshold 0.23, 50 of 68 failures caught",
-            )
-        with col4:
-            metric_card(
-                "Samples",
-                f"{train_rows:,} / {validation_rows:,}",
-                "Training / validation",
-            )
-
-    st.markdown("## Dataset at a glance")
-    st.markdown(
-        f"""
-        The project predicts whether an industrial engine will fail, using five sensor
-        readings and the machine type as inputs. The target is `Machine failure`, a
-        binary label. Models train on the AI4I 2020 Predictive Maintenance Dataset
-        with {train_rows:,} training samples and {validation_rows:,} validation
-        samples at seed {seed}. Class weights are balanced to account for the rare
-        failure class.
-        """
-    )
-    st.markdown(
-        f"""
-        Identifiers `UDI` and `Product ID` and the failure-mode columns `TWF`, `HDF`,
-        `PWF`, `OSF` and `RNF` are excluded from the model inputs to prevent target
-        leakage.
-        """
+        fleet_label = "Validation fleet (historical records)"
+    st.markdown(f"### {fleet_label}")
+    st.caption(
+        "Every chart and number below is computed live by scoring "
+        "data/processed/ai4i_validation.csv with the selected model and threshold."
     )
 
-    if metadata is None:
-        st.caption(
-            "data/processed/ai4i_metadata.json was not found. The sample counts and "
-            "seed above use the documented project values."
-        )
+    model_label = st.session_state["pe_model"]
+    threshold = float(st.session_state["pe_threshold"])
 
-    if importance is not None:
-        st.markdown("## Top five features")
-        top_five = importance.sort_values("Importance", ascending=False).head(5)
-        pairs = list(zip(top_five["Feature"], top_five["Importance"]))
-        st.plotly_chart(
-            bar_figure(
-                pairs,
-                "Random Forest importance, top five features",
-                "Share of importance",
-            ),
-            width="stretch",
-            config={"displayModeBar": False},
-        )
-        st.caption(
-            "Rotational speed, torque and tool wear dominate; the two temperature "
-            "features follow. Values come from results/random_forest_feature_importance.csv."
+    if validation_frame is None:
+        empty_state(
+            "Validation fleet not found",
+            "data/processed/ai4i_validation.csv is missing or unreadable, so the "
+            "fleet cannot be scored. Regenerate the processed splits, then reload "
+            "this page.",
+            [PREPROCESS_COMMAND],
         )
     else:
-        st.markdown("## Top five features")
-        empty_state(
-            "Feature importance file not found",
-            "results/random_forest_feature_importance.csv is missing. Run the "
-            "threshold tuning script to regenerate it.",
-            [TUNE_COMMAND],
-        )
+        result = cached_validation_probabilities(model_label)
+        if result["error"] == "model_missing":
+            empty_state(
+                "Trained model not found",
+                f"results/{MODEL_FILES[model_label]} is missing, so the validation "
+                "fleet cannot be scored. Generate the model artifacts, then reload.",
+                [TRAIN_COMMAND, TUNE_COMMAND],
+            )
+        elif result["error"] is not None:
+            empty_state(
+                "Model could not score the fleet",
+                f"results/{MODEL_FILES[model_label]} could not be loaded or used "
+                "for inference. Regenerate the model artifacts, then reload.",
+                [TRAIN_COMMAND, TUNE_COMMAND],
+            )
+        else:
+            probabilities = result["probabilities"]
+            y_true = validation_frame[TARGET].to_numpy(dtype=int)
+            metrics = live_performance(y_true, probabilities, threshold)
+            predicted_flagged = probabilities >= threshold
+            flagged_count = int(predicted_flagged.sum())
+            healthy_fraction = float((~predicted_flagged).mean())
+            fleet_health = float(np.mean(1.0 - probabilities))
 
-    st.markdown("## Why recall and PR-AUC matter here")
-    st.markdown(
-        """
-        Failures are rare: only 68 of the 2,000 validation samples are actual
-        failures. A model can reach high accuracy by predicting "no failure" almost
-        every time, which is why accuracy alone is misleading on this dataset.
-        Recall measures how many real failures the model catches. PR-AUC summarizes
-        precision and recall across all thresholds. Missing a real failure is the
-        expensive mistake, so recall and PR-AUC are the metrics that matter most.
-        """
-    )
+            card_columns = st.columns(5)
+            with card_columns[0]:
+                metric_card(
+                    "Machines scored",
+                    f"{len(validation_frame):,}",
+                    "Validation records",
+                )
+            with card_columns[1]:
+                metric_card(
+                    "Flagged at risk",
+                    f"{flagged_count:,}",
+                    f"Probability at or above {threshold:.2f}",
+                )
+            with card_columns[2]:
+                metric_card(
+                    "Healthy machines",
+                    format_percent(healthy_fraction),
+                    f"{len(validation_frame) - flagged_count:,} not flagged",
+                )
+            with card_columns[3]:
+                metric_card(
+                    "Fleet health score",
+                    format_percent(fleet_health),
+                    "Mean of 1 - failure probability",
+                )
+            with card_columns[4]:
+                metric_card(
+                    "Actual failures",
+                    f"{metrics['actual_failures']:,}",
+                    "Historical labels",
+                )
 
-    last_loaded(
-        [
-            "results/classical_ml_metrics.csv",
-            "results/random_forest_feature_importance.csv",
-            "data/processed/ai4i_metadata.json",
-        ]
-    )
+            st.markdown("### Live model performance")
+            st.caption(
+                f"{model_label} at threshold {threshold:.2f}. Metrics are recomputed "
+                "from the cached validation probabilities on every threshold change."
+            )
+            performance_columns = st.columns(5)
+            performance_cards = [
+                ("Accuracy", format_percent(metrics["accuracy"]), "All scored records"),
+                ("Precision", format_percent(metrics["precision"]), "Flagged records that failed"),
+                ("Recall", format_percent(metrics["recall"]), "Actual failures caught"),
+                ("F1-score", format_percent(metrics["f1"]), "Precision and recall balance"),
+                (
+                    "PR-AUC",
+                    f"{metrics['pr_auc']:.4f}",
+                    "Ranking metric, threshold-independent",
+                ),
+            ]
+            for target, (label, value, caption) in zip(
+                performance_columns, performance_cards
+            ):
+                with target:
+                    metric_card(label, value, caption)
+
+            matrix_col, sentence_col = st.columns([1, 1.1], gap="large")
+            with matrix_col:
+                st.markdown("#### Confusion matrix from live counts")
+                st.markdown(
+                    confusion_matrix_html(
+                        metrics["tn"], metrics["fp"], metrics["fn"], metrics["tp"]
+                    ),
+                    unsafe_allow_html=True,
+                )
+                st.caption(
+                    "Rows are actual outcomes and columns are threshold decisions. "
+                    "Positive class is failure."
+                )
+            with sentence_col:
+                st.markdown("#### Threshold outcome")
+                st.markdown(
+                    f"""
+                    <div class="pe-banner pe-banner-safe">
+                        <div class="pe-banner-body">
+                            {failure_sentence(metrics, threshold)}
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+                st.markdown(
+                    f"""
+                    The selected model flags {flagged_count:,} of
+                    {len(validation_frame):,} validation records. Of the
+                    {metrics['actual_failures']:,} historical failures, it catches
+                    {metrics['tp']:,} and misses {metrics['fn']:,}.
+                    """
+                )
+
+            st.markdown("### Risk distribution")
+            healthy_probabilities = probabilities[y_true == 0]
+            failure_probabilities = probabilities[y_true == 1]
+            distribution = go.Figure()
+            distribution.add_trace(
+                go.Histogram(
+                    x=healthy_probabilities,
+                    name=f"Actual healthy ({len(healthy_probabilities):,})",
+                    marker={"color": GREEN},
+                    opacity=0.62,
+                    autobinx=False,
+                    xbins={"start": 0.0, "end": 1.0, "size": 0.05},
+                    hovertemplate="Probability %{x:.2f}<br>Count %{y}<extra></extra>",
+                )
+            )
+            distribution.add_trace(
+                go.Histogram(
+                    x=failure_probabilities,
+                    name=f"Actual failure ({len(failure_probabilities):,})",
+                    marker={"color": RED},
+                    opacity=0.72,
+                    autobinx=False,
+                    xbins={"start": 0.0, "end": 1.0, "size": 0.05},
+                    hovertemplate="Probability %{x:.2f}<br>Count %{y}<extra></extra>",
+                )
+            )
+            distribution.update_layout(
+                **base_layout("Failure probability by actual outcome", "Failure probability")
+            )
+            distribution.update_layout(
+                barmode="overlay",
+                showlegend=True,
+                bargap=0.04,
+                height=360,
+                legend={
+                    "orientation": "h",
+                    "yanchor": "bottom",
+                    "y": 1.02,
+                    "xanchor": "right",
+                    "x": 1,
+                    "font": {"color": MUTED, "size": 11},
+                },
+            )
+            distribution.update_xaxes(
+                range=[0, 1], tickformat=".0%", gridcolor=BORDER
+            )
+            distribution.update_yaxes(gridcolor=BORDER, zeroline=False)
+            distribution.add_vline(
+                x=threshold,
+                line={"color": AMBER, "width": 2, "dash": "dot"},
+                annotation_text=f"threshold {threshold:.2f}",
+                annotation_position="top",
+                annotation_font={"color": MUTED, "size": 11},
+            )
+            st.plotly_chart(
+                distribution,
+                width="stretch",
+                config={"displayModeBar": False},
+                key="health_risk_distribution",
+            )
+            st.caption(
+                f"Bars are split by the historical {TARGET} label. The vertical line "
+                "marks the active decision threshold."
+            )
+
+            st.markdown("### Risk by machine type")
+            type_series = machine_type_series(validation_frame)
+            type_records = []
+            type_rows_html = []
+            for machine_type in MACHINE_TYPES:
+                mask = type_series == machine_type
+                count = int(mask.sum())
+                flagged = int(predicted_flagged[mask.to_numpy()].sum())
+                failures = int(y_true[mask.to_numpy()].sum())
+                flagged_rate = flagged / count if count else 0.0
+                failure_rate = failures / count if count else 0.0
+                type_records.append(
+                    {
+                        "type": machine_type,
+                        "count": count,
+                        "flagged": flagged,
+                        "flagged_rate": flagged_rate,
+                        "failures": failures,
+                        "failure_rate": failure_rate,
+                    }
+                )
+                type_rows_html.append(
+                    f"<tr><td>{machine_type}</td><td>{count:,}</td>"
+                    f"<td>{flagged:,}</td><td>{format_percent(flagged_rate)}</td>"
+                    f"<td>{failures:,}</td><td>{format_percent(failure_rate)}</td></tr>"
+                )
+            type_figure = go.Figure()
+            type_figure.add_trace(
+                go.Bar(
+                    x=[row["type"] for row in type_records],
+                    y=[row["flagged_rate"] for row in type_records],
+                    name="Flagged at risk",
+                    marker={"color": AMBER},
+                    text=[
+                        format_percent(row["flagged_rate"]) for row in type_records
+                    ],
+                    textposition="outside",
+                    hovertemplate="Type %{x}<br>Flagged %{y:.2%}<extra></extra>",
+                )
+            )
+            type_figure.add_trace(
+                go.Bar(
+                    x=[row["type"] for row in type_records],
+                    y=[row["failure_rate"] for row in type_records],
+                    name="Actual failure rate",
+                    marker={"color": RED},
+                    text=[
+                        format_percent(row["failure_rate"]) for row in type_records
+                    ],
+                    textposition="outside",
+                    hovertemplate="Type %{x}<br>Actual failure %{y:.2%}<extra></extra>",
+                )
+            )
+            type_figure.update_layout(
+                **base_layout("Flagged rate and actual failure rate by type", "Machine type")
+            )
+            max_rate = max(
+                [row["flagged_rate"] for row in type_records]
+                + [row["failure_rate"] for row in type_records]
+                + [0.01]
+            )
+            type_figure.update_layout(
+                barmode="group",
+                showlegend=True,
+                height=340,
+                legend={
+                    "orientation": "h",
+                    "yanchor": "bottom",
+                    "y": 1.02,
+                    "xanchor": "right",
+                    "x": 1,
+                    "font": {"color": MUTED, "size": 11},
+                },
+            )
+            type_figure.update_yaxes(
+                range=[0, max(0.1, max_rate * 1.35)],
+                tickformat=".0%",
+                gridcolor=BORDER,
+                zeroline=False,
+            )
+            st.plotly_chart(
+                type_figure,
+                width="stretch",
+                config={"displayModeBar": False},
+                key="health_type_risk",
+            )
+            st.markdown(
+                f"""
+                <div class="pe-table-wrap">
+                    <table class="pe-table">
+                        <thead><tr><th>Type</th><th>Machines</th><th>Flagged</th>
+                        <th>Flagged rate</th><th>Actual failures</th>
+                        <th>Actual failure rate</th></tr></thead>
+                        <tbody>{''.join(type_rows_html)}</tbody>
+                    </table>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            st.markdown("### Sensor analytics")
+            sensor_labels = [label for _, label, _, _ in SENSOR_COLUMNS]
+            selected_sensor_label = st.selectbox(
+                "Sensor",
+                sensor_labels,
+                index=3,
+                key="health_sensor_picker",
+            )
+            selected_sensor = next(
+                column
+                for column, label, _, _ in SENSOR_COLUMNS
+                if label == selected_sensor_label
+            )
+            healthy_values = validation_frame.loc[
+                y_true == 0, selected_sensor
+            ].to_numpy(dtype=float)
+            failed_values = validation_frame.loc[
+                y_true == 1, selected_sensor
+            ].to_numpy(dtype=float)
+            sensor_min = float(validation_frame[selected_sensor].min())
+            sensor_max = float(validation_frame[selected_sensor].max())
+            bin_size = (sensor_max - sensor_min) / 30.0
+            if bin_size <= 0:
+                bin_size = 1.0
+            sensor_figure = go.Figure()
+            sensor_figure.add_trace(
+                go.Histogram(
+                    x=healthy_values,
+                    name=f"Actual healthy ({len(healthy_values):,})",
+                    marker={"color": GREEN},
+                    opacity=0.62,
+                    histnorm="probability density",
+                    autobinx=False,
+                    xbins={
+                        "start": sensor_min,
+                        "end": sensor_max + bin_size,
+                        "size": bin_size,
+                    },
+                    hovertemplate="%{x}<br>Density %{y:.4f}<extra></extra>",
+                )
+            )
+            sensor_figure.add_trace(
+                go.Histogram(
+                    x=failed_values,
+                    name=f"Actual failure ({len(failed_values):,})",
+                    marker={"color": RED},
+                    opacity=0.62,
+                    histnorm="probability density",
+                    autobinx=False,
+                    xbins={
+                        "start": sensor_min,
+                        "end": sensor_max + bin_size,
+                        "size": bin_size,
+                    },
+                    hovertemplate="%{x}<br>Density %{y:.4f}<extra></extra>",
+                )
+            )
+            sensor_figure.update_layout(
+                **base_layout(
+                    f"{selected_sensor_label} distribution by actual outcome",
+                    selected_sensor_label,
+                )
+            )
+            sensor_figure.update_layout(
+                barmode="overlay",
+                showlegend=True,
+                bargap=0.02,
+                height=360,
+                legend={
+                    "orientation": "h",
+                    "yanchor": "bottom",
+                    "y": 1.02,
+                    "xanchor": "right",
+                    "x": 1,
+                    "font": {"color": MUTED, "size": 11},
+                },
+            )
+            sensor_figure.update_xaxes(gridcolor=BORDER)
+            sensor_figure.update_yaxes(gridcolor=BORDER, zeroline=False)
+            st.plotly_chart(
+                sensor_figure,
+                width="stretch",
+                config={"displayModeBar": False},
+                key="health_sensor_distribution",
+            )
+            healthy_median = float(np.median(healthy_values))
+            failed_median = float(np.median(failed_values))
+            st.caption(
+                f"Healthy median {format_sensor(selected_sensor, healthy_median)}; "
+                f"failure median {format_sensor(selected_sensor, failed_median)}. "
+                "Density normalizes the two groups so their shapes can be compared."
+            )
+
+            st.markdown("### Highest-risk machines")
+            top_frame = validation_frame.copy()
+            top_frame["_probability"] = probabilities
+            top_frame["_machine_type"] = type_series.to_numpy()
+            top_frame = top_frame.sort_values(
+                "_probability", ascending=False
+            ).head(10)
+            top_rows = []
+            for rank, (_, row) in enumerate(top_frame.iterrows(), start=1):
+                outcome = "Failure" if int(row[TARGET]) == 1 else "Healthy"
+                outcome_class = (
+                    "pe-verdict-risk" if outcome == "Failure" else "pe-verdict-safe"
+                )
+                sensor_cells = "".join(
+                    f"<td>{format_sensor(column, row[column])}</td>"
+                    for column, _, _, _ in SENSOR_COLUMNS
+                )
+                top_rows.append(
+                    f"<tr><td>{rank}</td>"
+                    f"<td>{format_percent(row['_probability'], 2)}</td>"
+                    f"<td>{row['_machine_type']}</td>{sensor_cells}"
+                    f'<td class="{outcome_class}">{outcome}</td></tr>'
+                )
+            st.markdown(
+                f"""
+                <div class="pe-table-wrap">
+                    <table class="pe-table">
+                        <thead><tr><th>Rank</th><th>Probability</th><th>Type</th>
+                        <th>Air temperature</th><th>Process temperature</th>
+                        <th>Rotational speed</th><th>Torque</th><th>Tool wear</th>
+                        <th>Actual outcome</th></tr></thead>
+                        <tbody>{''.join(top_rows)}</tbody>
+                    </table>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            st.caption(
+                f"Top 10 of {len(validation_frame):,} historical validation records, "
+                f"ranked by {model_label} failure probability."
+            )
+
+            last_loaded(
+                [
+                    "data/processed/ai4i_validation.csv",
+                    f"results/{MODEL_FILES[model_label]}",
+                ]
+            )
 
 # ===========================================================================
-# Failure prediction
+# Live prediction
 # ===========================================================================
-elif page == "Failure prediction":
+elif page == "Live prediction":
     render_header()
-    st.markdown("## Failure prediction")
+    st.markdown("## Live prediction")
+    st.markdown(
+        "Score a continuous telemetry stream. The selected model and threshold are "
+        "shared with the health page and apply to every source below."
+    )
 
-    if input_ranges is None:
+    source = st.radio(
+        "Telemetry source",
+        LIVE_SOURCES,
+        horizontal=True,
+        key="live_source",
+    )
+
+    available_models = [
+        label for label in MODEL_ORDER if model_path(label).exists()
+    ]
+    missing_models = [
+        label for label in MODEL_ORDER if label not in available_models
+    ]
+
+    if train_stats is None or input_ranges is None:
         empty_state(
             "Training data not found",
-            "data/processed/ai4i_train.csv is missing, so the input ranges for the "
-            "prediction form cannot be derived. Restore the file, then reload this page.",
+            "data/processed/ai4i_train.csv is missing or unreadable. The simulator, "
+            "manual controls, and training percentiles all need this file. Regenerate "
+            "the processed splits, then reload this page.",
+            [PREPROCESS_COMMAND],
+        )
+    elif not available_models:
+        empty_state(
+            "Trained models not found",
+            "No results/*.joblib model artifacts are available, so telemetry cannot "
+            "be scored. Generate the model artifacts, then reload this page.",
+            [TRAIN_COMMAND, TUNE_COMMAND],
         )
     else:
-        left, right = st.columns([1.05, 1], gap="large")
-
-        with left:
-            model_name = st.selectbox(
-                "Model",
-                list(MODEL_FILES.keys()),
-                index=2,
-                help="The tuned option reuses the Random Forest model with a 0.23 threshold.",
+        if missing_models:
+            st.warning(
+                "Model artifacts are unavailable for: "
+                + ", ".join(missing_models)
+                + ". Those rows show not available."
             )
 
-            st.markdown("### Sensor readings")
-            values = {}
-            sensor_left, sensor_right = st.columns(2)
-            for index, (column, label, number_format, step) in enumerate(SENSOR_COLUMNS):
-                bounds = input_ranges[column]
-                target = sensor_left if index % 2 == 0 else sensor_right
-                with target:
-                    values[column] = st.number_input(
-                        label,
-                        min_value=bounds["min"],
-                        max_value=bounds["max"],
-                        value=bounds["default"],
-                        step=step,
-                        format=number_format,
-                        key=f"input_{column}",
-                    )
+        model_label = st.session_state["pe_model"]
+        threshold = float(st.session_state["pe_threshold"])
 
-            st.markdown("### Machine")
-            machine_type = st.selectbox("Machine type", ["L", "M", "H"], index=1)
+        if source == "Simulated engine":
+            st.markdown("### Simulated engine")
+            st.caption(
+                "Simulated telemetry (generated in real time, not recorded data)"
+            )
+            st.caption(
+                "Noise levels, ranges, machine-type operating points, the "
+                "torque-speed regression and the tool-wear increment are estimated "
+                f"from data/processed/ai4i_train.csv ({train_stats['rows']:,} rows)."
+            )
 
-            input_frame = build_input_frame(values, machine_type)
+            sim = st.session_state.get("sim_state")
+            if sim is None:
+                initial_wear = train_stats["sensors"]["Tool wear [min]"]["median"]
+                sim = new_sim_state(
+                    train_stats, initial_wear, machine_type="M", running=True
+                )
+                st.session_state["sim_state"] = sim
+                st.session_state.setdefault("sim_history", [])
+                st.session_state.setdefault("sim_total_ticks", 0)
 
-            model_filename = MODEL_FILES[model_name]
-            model_path = RESULTS_DIR / model_filename
+            controls = st.columns(4)
+            with controls[0]:
+                machine_type = st.selectbox(
+                    "Machine type",
+                    MACHINE_TYPES,
+                    index=MACHINE_TYPES.index(sim["machine_type"]),
+                    key="sim_machine_type",
+                )
+            with controls[1]:
+                speed_label = st.radio(
+                    "Speed",
+                    ["0.5x", "1x", "2x"],
+                    index=1,
+                    horizontal=True,
+                    key="sim_speed",
+                )
+            with controls[2]:
+                start_wear = st.slider(
+                    "Starting tool wear (min)",
+                    min_value=float(input_ranges["Tool wear [min]"]["min"]),
+                    max_value=float(input_ranges["Tool wear [min]"]["max"]),
+                    value=float(sim["start_wear"]),
+                    step=1.0,
+                    key="sim_start_wear",
+                    help="Applied when the simulator is reset.",
+                )
+            with controls[3]:
+                st.caption("Run state")
+                st.markdown(
+                    f"**{'Running' if sim['running'] else 'Paused'}**"
+                )
+                st.caption(f"Tick {sim['tick']:,}")
 
-        with right:
-            st.markdown("### Result")
+            if machine_type != sim["machine_type"]:
+                sim["machine_type"] = machine_type
+                sim["rpm"] = train_stats["type_stats"][machine_type]["rpm_median"]
+                sim["air"] = train_stats["type_stats"][machine_type]["air_median"]
+            sim["start_wear"] = float(start_wear)
+            sim["speed"] = {"0.5x": 0.5, "1x": 1.0, "2x": 2.0}[speed_label]
 
-            if not model_path.exists():
-                empty_state(
-                    "Trained model not found",
-                    f"results/{model_filename} is missing, so a prediction cannot "
-                    "be made. Generate the model artifacts, then reload this page.",
-                    [TRAIN_COMMAND, TUNE_COMMAND],
+            run_columns = st.columns(4)
+            if run_columns[0].button(
+                "Start",
+                width="stretch",
+                disabled=sim["running"],
+                key="sim_start_button",
+            ):
+                sim["running"] = True
+                sim["last_tick_wall"] = 0.0
+            if run_columns[1].button(
+                "Pause",
+                width="stretch",
+                disabled=not sim["running"],
+                key="sim_pause_button",
+            ):
+                sim["running"] = False
+            if run_columns[2].button(
+                "Reset",
+                width="stretch",
+                key="sim_reset_button",
+            ):
+                st.session_state["sim_state"] = new_sim_state(
+                    train_stats,
+                    start_wear,
+                    machine_type=machine_type,
+                    running=False,
+                )
+                st.session_state["sim_history"] = []
+                st.session_state["sim_total_ticks"] = 0
+                st.rerun()
+            run_columns[3].caption(
+                "Readings are generated once per second at 1x speed."
+            )
+
+            st.markdown("#### Fault injection")
+            fault_columns = st.columns(4)
+            if fault_columns[0].button(
+                "Overload (raise torque)",
+                width="stretch",
+                disabled="overload" in sim["faults"],
+                key="fault_overload",
+            ):
+                apply_sim_fault(sim, "overload", train_stats)
+            if fault_columns[1].button(
+                "Overheat (raise temperature)",
+                width="stretch",
+                disabled="overheat" in sim["faults"],
+                key="fault_overheat",
+            ):
+                apply_sim_fault(sim, "overheat", train_stats)
+            if fault_columns[2].button(
+                "Accelerate wear",
+                width="stretch",
+                disabled="accelerate_wear" in sim["faults"],
+                key="fault_wear",
+            ):
+                apply_sim_fault(sim, "accelerate_wear", train_stats)
+            if fault_columns[3].button(
+                "Clear faults",
+                width="stretch",
+                disabled=not sim["faults"],
+                key="fault_clear",
+            ):
+                clear_sim_faults(sim)
+
+            if sim["faults"]:
+                st.caption(
+                    "Active faults: " + ", ".join(sim["faults"]).replace("_", " ")
                 )
             else:
-                default_threshold = 0.23 if "tuned" in model_name else 0.5
-                threshold = st.slider(
-                    "Decision threshold",
-                    min_value=0.05,
-                    max_value=0.95,
-                    value=default_threshold,
-                    step=0.01,
-                    key=f"threshold::{model_name}",
-                    help="Predict failure when the model probability is at or above this value.",
-                )
-                predict_clicked = st.button(
-                    "Run prediction", type="primary", width="stretch"
-                )
+                st.caption("No injected faults. Simulation continues from training-derived conditions.")
 
-                signature = tuple(
-                    values[column] for column, _, _, _ in SENSOR_COLUMNS
-                ) + (machine_type,)
-
-                if predict_clicked:
-                    try:
-                        with st.spinner("Loading model"):
-                            model = load_model(model_filename)
-                        probability = float(model.predict_proba(input_frame)[0, 1])
-                        st.session_state["prediction"] = {
-                            "probability": probability,
-                            "model": model_name,
-                            "signature": signature,
-                            "readout": {
-                                column: values[column]
-                                for column, _, _, _ in SENSOR_COLUMNS
-                            },
-                        }
-                        st.session_state.pop("prediction_error", None)
-                    except Exception:
-                        st.session_state.pop("prediction", None)
-                        st.session_state["prediction_error"] = (
-                            model_name,
-                            f"results/{model_filename} could not be loaded or used. "
-                            "Regenerate the model artifacts and try again.",
+            @st.fragment(run_every=1.0)
+            def simulated_live_fragment():
+                live_sim = st.session_state.get("sim_state")
+                if live_sim is None:
+                    return
+                if live_sim["running"]:
+                    now_wall = time.monotonic()
+                    if now_wall - live_sim["last_tick_wall"] >= 0.55:
+                        sensor_values, machine = simulate_next_reading(
+                            live_sim, train_stats
                         )
-
-                error = st.session_state.get("prediction_error")
-                error_for_current = bool(error and error[0] == model_name)
-                if error_for_current:
-                    empty_state(
-                        "Prediction failed",
-                        error[1],
-                        [TRAIN_COMMAND, TUNE_COMMAND],
+                        reading = score_reading(
+                            sensor_values, machine, "Simulated engine"
+                        )
+                        append_history("sim_history", reading)
+                        st.session_state["sim_total_ticks"] = (
+                            st.session_state.get("sim_total_ticks", 0) + 1
+                        )
+                        live_sim["last_tick_wall"] = now_wall
+                if not st.session_state.get("sim_history"):
+                    st.markdown(
+                        '<div class="pe-empty"><div class="pe-empty-title">'
+                        "Simulator paused</div><div class=\"pe-empty-body\">Press "
+                        "Start to generate a reading every second.</div></div>",
+                        unsafe_allow_html=True,
+                    )
+                    return
+                render_live_panel(
+                    st.session_state["sim_history"],
+                    st.session_state["pe_model"],
+                    float(st.session_state["pe_threshold"]),
+                    train_stats,
+                    train_frame,
+                    int(st.session_state.get("sim_total_ticks", 0)),
+                )
+                if not live_sim["running"]:
+                    st.caption(
+                        "Simulator paused. The panel keeps the last reading and does "
+                        "not generate new ticks."
                     )
 
-                stored = st.session_state.get("prediction")
-                if (
-                    stored
-                    and stored.get("model") == model_name
-                    and stored.get("signature") == signature
-                ):
-                    probability = stored["probability"]
-                    predicted_failure = probability >= threshold
+            simulated_live_fragment()
 
-                    if predicted_failure:
-                        st.markdown(
-                            f"""
-                            <div class="pe-banner pe-banner-risk">
-                                <div class="pe-banner-title">Failure predicted</div>
-                                <div class="pe-banner-body">
-                                    Probability {probability:.2f} is at or above the
-                                    {threshold:.2f} threshold, so the model flags this
-                                    machine.
-                                </div>
-                            </div>
-                            """,
-                            unsafe_allow_html=True,
+        elif source == "External feed":
+            st.markdown("### External feed")
+            st.caption(
+                "Watching data/live/stream.csv. Rows are scored in file order as they "
+                "are appended."
+            )
+
+            @st.fragment(run_every=1.0)
+            def external_live_fragment():
+                parsed = parse_stream_csv(STREAM_PATH)
+                if parsed["status"] in ("missing", "empty", "unreadable"):
+                    titles = {
+                        "missing": "External feed not found",
+                        "empty": "External feed is empty",
+                        "unreadable": "External feed could not be read",
+                    }
+                    empty_stream_state(
+                        titles[parsed["status"]],
+                        "data/live/stream.csv does not contain any telemetry rows. "
+                        "Append rows with the columns listed below. Expected columns: "
+                        + ", ".join(STREAM_COLUMNS)
+                        + ".",
+                    )
+                    return
+                if parsed["status"] == "invalid_columns":
+                    empty_stream_state(
+                        "External feed has the wrong columns",
+                        "The file header does not match the required stream format. "
+                        + " ".join(parsed["warnings"]),
+                    )
+                    return
+                if parsed["status"] == "no_valid_rows":
+                    empty_stream_state(
+                        "External feed has no valid rows",
+                        "At least one row must have an ISO timestamp, five finite "
+                        "numeric sensors and machine_type L, M or H. "
+                        + " ".join(parsed["warnings"]),
+                    )
+                    return
+
+                for warning in parsed["warnings"]:
+                    st.warning(warning)
+
+                newest = parsed["newest"]
+                age_seconds = (
+                    datetime.now(timezone.utc) - newest
+                ).total_seconds()
+                if age_seconds > STREAM_STALE_SECONDS:
+                    empty_stream_state(
+                        "External feed is stale",
+                        f"The newest valid row is {human_age(age_seconds)} old, "
+                        f"above the {STREAM_STALE_SECONDS} s freshness limit. Append "
+                        "fresh telemetry to data/live/stream.csv. Expected columns: "
+                        + ", ".join(STREAM_COLUMNS)
+                        + ".",
+                        f"Newest timestamp: {newest.strftime('%Y-%m-%d %H:%M:%S')} UTC.",
+                    )
+                    return
+
+                frame = parsed["frame"]
+                processed = int(st.session_state.get("external_processed", 0))
+                if len(frame) < processed:
+                    st.session_state["external_history"] = []
+                    st.session_state["external_total_ticks"] = 0
+                    processed = 0
+                if len(frame) > processed:
+                    for _, row in frame.iloc[processed:].iterrows():
+                        sensor_values = {
+                            target_column: float(row[target_column])
+                            for target_column in STREAM_SENSOR_MAP.values()
+                        }
+                        reading = score_reading(
+                            sensor_values,
+                            str(row["machine_type"]),
+                            "External feed",
+                            timestamp=row["timestamp"].to_pydatetime(),
+                        )
+                        append_history("external_history", reading)
+                    st.session_state["external_total_ticks"] = (
+                        st.session_state.get("external_total_ticks", 0)
+                        + (len(frame) - processed)
+                    )
+                    st.session_state["external_processed"] = len(frame)
+
+                history = st.session_state.get("external_history", [])
+                if not history:
+                    empty_stream_state(
+                        "No external readings scored",
+                        "The file is fresh but no rows have been scored yet. "
+                        "Expected columns: " + ", ".join(STREAM_COLUMNS) + ".",
+                    )
+                    return
+                render_live_panel(
+                    history,
+                    st.session_state["pe_model"],
+                    float(st.session_state["pe_threshold"]),
+                    train_stats,
+                    train_frame,
+                    int(st.session_state.get("external_total_ticks", 0)),
+                )
+                st.caption(
+                    f"Newest valid row: {newest.strftime('%Y-%m-%d %H:%M:%S')} UTC. "
+                    f"Valid rows scored: {len(frame):,}."
+                )
+
+            external_live_fragment()
+
+        else:
+            st.markdown("### Manual reading")
+            st.caption("Manual telemetry (operator input, not recorded data)")
+            st.caption(
+                "Move a control to append a new manual reading. No reading is added "
+                "when only the model or threshold changes."
+            )
+
+            manual_left, manual_right = st.columns(2, gap="large")
+            manual_values = {}
+            for index, (column, label, number_format, step) in enumerate(
+                SENSOR_COLUMNS
+            ):
+                bounds = input_ranges[column]
+                target = manual_left if index % 2 == 0 else manual_right
+                with target:
+                    if column == "Rotational speed [rpm]":
+                        manual_values[column] = st.slider(
+                            label,
+                            min_value=int(bounds["min"]),
+                            max_value=int(bounds["max"]),
+                            value=int(bounds["default"]),
+                            step=int(step),
+                            key=f"manual_{column}",
+                        )
+                    elif column == "Tool wear [min]":
+                        manual_values[column] = st.slider(
+                            label,
+                            min_value=int(bounds["min"]),
+                            max_value=int(bounds["max"]),
+                            value=int(bounds["default"]),
+                            step=1,
+                            key=f"manual_{column}",
                         )
                     else:
-                        st.markdown(
-                            f"""
-                            <div class="pe-banner pe-banner-safe">
-                                <div class="pe-banner-title">No failure predicted</div>
-                                <div class="pe-banner-body">
-                                    Probability {probability:.2f} is below the
-                                    {threshold:.2f} threshold, so the model does not
-                                    flag this machine.
-                                </div>
-                            </div>
-                            """,
-                            unsafe_allow_html=True,
+                        manual_values[column] = st.slider(
+                            label,
+                            min_value=float(bounds["min"]),
+                            max_value=float(bounds["max"]),
+                            value=float(bounds["default"]),
+                            step=float(step),
+                            format=number_format,
+                            key=f"manual_{column}",
                         )
+            manual_type = st.selectbox(
+                "Machine type",
+                MACHINE_TYPES,
+                index=1,
+                key="manual_machine_type",
+            )
 
-                    st.plotly_chart(
-                        probability_figure(probability, threshold),
-                        width="stretch",
-                        config={"displayModeBar": False},
-                    )
-                    st.caption(
-                        f"The dotted line marks the active threshold at {threshold:.2f}. "
-                        "Hover the bar for the exact probability."
-                    )
+            signature = tuple(
+                round(float(manual_values[column]), 6)
+                for column, _, _, _ in SENSOR_COLUMNS
+            ) + (manual_type,)
+            if signature != st.session_state.get("manual_signature"):
+                reading = score_reading(
+                    manual_values, manual_type, "Manual reading"
+                )
+                append_history("manual_history", reading)
+                st.session_state["manual_total_ticks"] = (
+                    st.session_state.get("manual_total_ticks", 0) + 1
+                )
+                st.session_state["manual_signature"] = signature
 
-                    tiles = []
-                    for column, _, _, _ in SENSOR_COLUMNS:
-                        label = column.replace(" [K]", "").replace(" [rpm]", "").replace(" [Nm]", "").replace(" [min]", "")
-                        tiles.append(
-                            f"""
-                            <div class="pe-tile">
-                                <div class="pe-tile-label">{label}</div>
-                                <div class="pe-tile-value">{format_sensor(column, stored['readout'][column])}</div>
-                            </div>
-                            """
-                        )
-                    st.markdown(
-                        '<div class="pe-tile-row">' + "".join(tiles) + "</div>",
-                        unsafe_allow_html=True,
-                    )
-
-                    st.markdown("**What drives this model**")
-                    st.markdown(
-                        """
-                        Rotational speed, torque and tool wear are the three most
-                        important Random Forest features, together accounting for about
-                        80% of its importance.
-                        """
-                    )
-                elif not error_for_current:
-                    st.markdown(
-                        '<div class="pe-empty">'
-                        '<div class="pe-empty-title">No prediction yet</div>'
-                        '<div class="pe-empty-body">Set the sensor readings and machine type, '
-                        'then run prediction to see the failure probability and status.</div>'
-                        "</div>",
-                        unsafe_allow_html=True,
-                    )
-
-        last_loaded(
-            [
-                "data/processed/ai4i_train.csv",
-                f"results/{model_filename}",
-            ]
-        )
-
-    if input_ranges is None:
-        last_loaded(["data/processed/ai4i_train.csv"])
+            history = st.session_state.get("manual_history", [])
+            render_live_panel(
+                history,
+                model_label,
+                threshold,
+                train_stats,
+                train_frame,
+                int(st.session_state.get("manual_total_ticks", 0)),
+            )
+            last_loaded(
+                [
+                    "data/processed/ai4i_train.csv",
+                    f"results/{MODEL_FILES[model_label]}",
+                ]
+            )
 
 # ===========================================================================
 # Model comparison
 # ===========================================================================
-elif page == "Model comparison":
+elif page == "Model Comparison":
     render_header()
-    st.markdown("## Model comparison")
+    st.markdown("## Model Comparison")
+    st.caption("Saved training-time results.")
 
     if metrics is None:
         empty_state(
@@ -1243,8 +3043,9 @@ elif page == "Model comparison":
         st.markdown("### Validation metrics")
         render_metrics_table(metrics)
         st.caption(
-            "Validation set, 2,000 samples. The tuned row reports only the metrics "
-            "recorded for that experiment."
+            "Validation set, 2,000 samples. Saved rows come from "
+            "results/classical_ml_metrics.csv. The tuned row is recomputed live from "
+            "ai4i_validation.csv at its 0.23 threshold."
         )
 
         st.markdown("### Metric charts")
@@ -1268,25 +3069,41 @@ elif page == "Model comparison":
                 )
 
         st.markdown("### Trade-off")
-        st.markdown(
-            """
-            Logistic Regression catches 82.35% of failures but only 14.21% of its
-            failure alarms are correct. Random Forest is precise at 90.63% but catches
-            only 42.65% of failures at the default 0.5 threshold. Lowering its
-            threshold to 0.23 raises recall to 73.53% while accuracy moves from
-            97.90% to 97.45%. The tuned model trades a small amount of accuracy for
-            far more real failures caught.
-            """
-        )
+        combined = build_metrics_with_tuned(metrics)
+        lookup = combined.set_index("Model")
+        try:
+            lr_row = lookup.loc["Logistic Regression"]
+            rf_row = lookup.loc["Random Forest"]
+            tuned_row = lookup.loc[TUNED_LABEL]
+            st.markdown(
+                f"""
+                Logistic Regression catches
+                {format_percent(lr_row['Recall'])} of actual failures but only
+                {format_percent(lr_row['Precision'])} of its failure alarms are
+                correct. Random Forest is precise at
+                {format_percent(rf_row['Precision'])} but catches
+                {format_percent(rf_row['Recall'])} of failures at the saved
+                threshold. The tuned row at 0.23 raises recall to
+                {format_percent(tuned_row['Recall'])} while accuracy moves from
+                {format_percent(rf_row['Accuracy'])} to
+                {format_percent(tuned_row['Accuracy'])}. The tuned setting trades a
+                small amount of accuracy for more real failures caught.
+                """
+            )
+        except (KeyError, TypeError):
+            st.markdown(
+                "Saved rows are available, but the tuned row could not be computed "
+                "because a model artifact or validation file is missing."
+            )
 
     last_loaded(["results/classical_ml_metrics.csv"])
 
 # ===========================================================================
 # Feature importance
 # ===========================================================================
-elif page == "Feature importance":
+elif page == "Feature Importance":
     render_header()
-    st.markdown("## Feature importance")
+    st.markdown("## Feature Importance")
 
     if importance is None:
         empty_state(
@@ -1361,6 +3178,25 @@ else:
     render_header()
     st.markdown("## About and methodology")
 
+    st.markdown("### Pages")
+    st.markdown(
+        """
+        **Engine health and analytics** is the default page. It scores the historical
+        validation fleet with the selected model and threshold, showing fleet health
+        cards, live performance metrics, a live confusion matrix, risk distribution,
+        risk by machine type, sensor distributions, and the highest-risk machines.
+
+        **Live prediction** scores a continuous stream from a training-derived
+        simulator, an external CSV feed, or manual controls. It shows a probability
+        gauge, status banner, rolling probability and sensor charts, readout tiles,
+        all four model probabilities, an alert log, counters, and training
+        percentiles.
+
+        **Model Comparison**, **Feature Importance**, and **Confusion matrices** show
+        saved training artifacts. **About** documents the methodology.
+        """
+    )
+
     st.markdown("### Data and leakage prevention")
     st.markdown(
         """
@@ -1390,9 +3226,56 @@ else:
         decision threshold. The threshold 0.23 was chosen using stratified 3-fold
         cross-validation on the training data only, maximizing F1 while requiring at
         least 75% recall. The validation set was not used to choose the threshold.
-        Lowering the threshold from 0.5 to 0.23 raises failure recall from 42.65% to
-        73.53% and catches 50 of 68 actual failures, at a small accuracy cost from
-        97.90% to 97.45%.
+        Lowering the threshold to 0.23 raises failure recall at a small accuracy
+        cost. Model Comparison recomputes the tuned row from validation data.
+        """
+    )
+
+    st.markdown("### Validation fleet")
+    st.markdown(
+        """
+        Engine health and analytics scores data/processed/ai4i_validation.csv, a
+        historical validation split of 2,000 records. Those readings are historical
+        records, not live sensor data. Every metric, confusion matrix, probability
+        distribution and risk table on that page is calculated live from the cached
+        model probabilities for the active threshold. The page does not read
+        results/classical_ml_metrics.csv.
+        """
+    )
+
+    st.markdown("### Simulator methodology")
+    st.markdown(
+        """
+        The simulator initialises each sensor near a training median and then
+        generates new readings in the browser session. It is simulated telemetry,
+        not recorded data. Ranges, medians, standard deviations, machine-type
+        operating points, the air-to-process temperature offset, the torque-speed
+        regression and its residual noise, and the tool-wear increment are all
+        estimated from data/processed/ai4i_train.csv. Air temperature follows a
+        bounded random walk inside the training range. Process temperature tracks
+        air temperature plus the estimated offset. Rotational speed moves around the
+        selected machine type's operating point, and torque follows the fitted
+        inverse torque-speed relationship with training residual noise. Tool wear
+        advances by a trained-range increment derived from the median wear at
+        training failures.
+
+        Fault buttons apply training-scale stress profiles. Overload raises torque
+        and lowers speed, overheat raises temperature and the coupled thermal load,
+        and accelerate wear advances tool wear while raising the associated load.
+        Clear faults removes the active offsets; cumulative tool wear is not
+        reversed.
+        """
+    )
+
+    st.markdown("### External feed")
+    st.markdown(
+        """
+        Live prediction can watch data/live/stream.csv with columns timestamp,
+        air_temperature, process_temperature, rotational_speed, torque, tool_wear and
+        machine_type. Timestamps are parsed as UTC, values must be finite numbers,
+        and machine_type must be L, M or H. Malformed rows are skipped with a visible
+        message, and a feed older than 30 seconds is shown as stale rather than
+        scored as fresh. Missing sensor values are never filled in.
         """
     )
 
@@ -1407,7 +3290,14 @@ else:
     )
 
     st.caption(
-        "Validation-set results only. These models are not intended for production "
-        "decisions without independent test-set evaluation."
+        "Validation-set results and simulated telemetry are shown for engineering "
+        "review only. These models are not intended for production decisions without "
+        "independent test-set evaluation."
     )
-    last_loaded(["data/processed/ai4i_metadata.json"])
+    last_loaded(
+        [
+            "data/processed/ai4i_metadata.json",
+            "data/processed/ai4i_train.csv",
+            "data/processed/ai4i_validation.csv",
+        ]
+    )

@@ -1,13 +1,7 @@
-
-numpy
+streamlit>=1.37
 pandas
-scikit-learn
-matplotlib
-seaborn
-jupyter
+numpy
+scikit-learn==1.9.1
 joblib
-xgboost
-streamlit
+matplotlib
 plotly
-shap
-torch
