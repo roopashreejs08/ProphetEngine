@@ -13,3 +13,10 @@ data/ai4i/*.csv
 # Notebook temporary files
 .ipynb_checkpoints/
 .DS_Store
+
+# Dashboard: local live-feed file written by the Live monitor demo
+data/live/stream.csv
+
+# Vercel CLI project link
+.vercel/
+.env.local

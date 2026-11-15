@@ -1,0 +1,18 @@
+# Container image Vercel builds and runs for the Streamlit dashboard.
+# Deploy from this folder with `vercel deploy` (preview) or `vercel deploy --prod`.
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PORT=80
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install -r requirements.txt
+
+COPY . .
+
+# Vercel routes traffic to $PORT (80 by default). Streamlit keeps a WebSocket
+# open per browser session.
+CMD ["sh", "-c", "streamlit run app.py --server.port=${PORT:-80} --server.address=0.0.0.0 --server.headless=true"]
