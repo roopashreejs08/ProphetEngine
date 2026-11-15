@@ -102,26 +102,4 @@ STREAM_STALE_SECONDS = 30
 CMAPSS_SUBSETS = ["FD001", "FD003"]
 RUL_CAP = 125
 
-# Colour system. Categorical slots were validated for colour-vision
-# deficiency separation on light and dark surfaces; status colours are
-# reserved for health states and always shipped with a text label.
-MODEL_COLORS = {
-    "light": {
-        "Logistic Regression": "#2a78d6",
-        "Decision Tree": "#eb6834",
-        "Random Forest": "#1baf7a",
-        TUNED_LABEL: "#6250d6",
-    },
-    "dark": {
-        "Logistic Regression": "#3987e5",
-        "Decision Tree": "#d95926",
-        "Random Forest": "#199e70",
-        TUNED_LABEL: "#9085e9",
-    },
-}
-STATUS_COLORS = {
-    "healthy": "#0ca30c",
-    "watch": "#fab219",
-    "critical": "#d03b3b",
-}
-ACCENT = {"light": "#2a78d6", "dark": "#3987e5"}
+# Colours live in dashboard/theme.py.

@@ -44,13 +44,10 @@ pages = {
     ],
 }
 
-with st.sidebar:
-    st.markdown('<div class="pe-side-brand">ProphetEngine</div>'
-                '<div class="pe-side-sub">Predictive maintenance console</div>', unsafe_allow_html=True)
-
 navigation = st.navigation(pages, position="sidebar", expanded=True)
 ui.sidebar_controls()
 with st.sidebar:
-    st.caption(f"Data: AI4I 2020 | Models: scikit-learn | [Source code]({C.REPO_URL})")
+    st.markdown(f'<div class="pe-side-foot">Data: AI4I 2020 &middot; Models: scikit-learn<br>'
+                f'<a href="{C.REPO_URL}" target="_blank">Source code</a></div>', unsafe_allow_html=True)
 
 navigation.run()

@@ -146,9 +146,10 @@ The model and alert threshold in the sidebar apply to every page. The default is
 
 ```text
 app.py                     # entry point: page config + navigation
-.streamlit/config.toml     # light and dark theme
+.streamlit/config.toml     # light and dark theme (base values; see dashboard/theme.py)
 dashboard/
-├── config.py              # paths, feature names, model registry, colours
+├── config.py              # paths, feature names, model registry
+├── theme.py               # colour tokens (neutral palette, one accent, red for alerts)
 ├── data.py                # loaders, upload validation, live-feed parsing (no Streamlit)
 ├── scoring.py             # metrics, threshold sweeps, explanations (no Streamlit)
 ├── simulator.py           # synthetic machine for the Live monitor

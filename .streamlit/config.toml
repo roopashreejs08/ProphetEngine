@@ -1,42 +1,48 @@
-# ProphetEngine dashboard theme.
-# Light and dark variants share one palette; viewers switch between them from
-# the app menu (top right) -> Settings -> Theme. Dark is the default.
+# ProphetEngine dashboard theme - minimal and mostly neutral.
+# Light and dark variants share one design (see dashboard/theme.py for the full
+# token set used by the CSS and charts; keep the base values here in sync).
+# Viewers switch from the app menu (top right) -> Settings -> Theme. Dark is the default.
 
 [theme]
 base = "dark"
-font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap, sans-serif"
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap, sans-serif"
 headingFont = "Inter, sans-serif"
 codeFont = "monospace"
-baseRadius = "medium"
-buttonRadius = "medium"
+baseFontSize = 15
+baseRadius = "small"
+buttonRadius = "small"
 showSidebarBorder = true
-headingFontWeights = [700, 600, 600, 600, 600, 600]
-headingFontSizes = ["2.1rem", "1.45rem", "1.15rem", "1rem", "0.95rem", "0.9rem"]
-metricValueFontWeight = 650
+headingFontWeights = [600, 600, 600, 600, 500, 500]
+headingFontSizes = ["1.9rem", "1.4rem", "1.1rem", "1rem", "0.92rem", "0.88rem"]
+metricValueFontWeight = 600
 
 [theme.light]
-primaryColor = "#2a78d6"
+primaryColor = "#2d5b88"
 backgroundColor = "#ffffff"
-secondaryBackgroundColor = "#f3f5f8"
-textColor = "#14171f"
-borderColor = "#e1e4ea"
-linkColor = "#1c5cab"
-chartCategoricalColors = ["#2a78d6", "#eb6834", "#1baf7a", "#6250d6", "#e87ba4", "#008300", "#eda100", "#e34948"]
+secondaryBackgroundColor = "#f4f4f5"
+textColor = "#18181b"
+borderColor = "#e4e4e7"
+dataframeBorderColor = "#e4e4e7"
+linkColor = "#2d5b88"
+chartCategoricalColors = ["#2d5b88", "#71717a", "#a1a1aa", "#d4d4d8"]
 
 [theme.light.sidebar]
-backgroundColor = "#f6f7f9"
+backgroundColor = "#fafafa"
+secondaryBackgroundColor = "#f4f4f5"
 
 [theme.dark]
-primaryColor = "#3987e5"
-backgroundColor = "#0e1117"
-secondaryBackgroundColor = "#1a1f29"
-textColor = "#e8eaf0"
-borderColor = "#2a303c"
-linkColor = "#86b6ef"
-chartCategoricalColors = ["#3987e5", "#d95926", "#199e70", "#9085e9", "#d55181", "#008300", "#c98500", "#e66767"]
+primaryColor = "#7da3cc"
+backgroundColor = "#111113"
+secondaryBackgroundColor = "#1c1c1f"
+textColor = "#ededef"
+borderColor = "#2a2a2f"
+dataframeBorderColor = "#2a2a2f"
+linkColor = "#7da3cc"
+chartCategoricalColors = ["#7da3cc", "#a1a1aa", "#71717a", "#4a4a51"]
 
 [theme.dark.sidebar]
-backgroundColor = "#12161e"
+backgroundColor = "#141416"
+secondaryBackgroundColor = "#1c1c1f"
 
 [server]
 headless = true

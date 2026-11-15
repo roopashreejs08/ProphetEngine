@@ -11,6 +11,7 @@ from dashboard import config as C
 from dashboard import data as D
 from dashboard import scoring as S
 from dashboard import simulator as SIM
+from dashboard import theme as T
 
 
 # ---------------------------------------------------------------------------
@@ -25,66 +26,151 @@ def mode():
     return "light" if kind == "light" else "dark"
 
 
-def model_color(label):
-    return C.MODEL_COLORS[mode()][label]
+def tokens():
+    """Colour tokens for the viewer's active theme (see dashboard/theme.py)."""
+    return T.tokens(mode())
 
 
-CSS = """
+def key_model(present=None):
+    """The model drawn in the accent colour: the active model, or the Random Forest when the
+    tuned entry (same probabilities, different threshold) is active but not in the chart."""
+    present = list(present or C.MODEL_ORDER)
+    active = st.session_state.get("pe_model", C.DEFAULT_MODEL)
+    if active in present:
+        return active
+    if active == C.TUNED_LABEL and "Random Forest" in present:
+        return "Random Forest"
+    return None
+
+
+def model_style(label, present=None):
+    """(colour, dash) for a model series: accent + solid for the key model, greys + dashes for the rest."""
+    present = list(present or C.MODEL_ORDER)
+    t = tokens()
+    key = key_model(present)
+    if label == key:
+        return t["accent"], "solid"
+    others = [m for m in C.MODEL_ORDER if m in present and m != key]
+    i = others.index(label) if label in others else 0
+    return t["greys"][min(i, 2)], T.DASHES[min(i, 2)]
+
+
+def model_color(label, present=None):
+    return model_style(label, present)[0]
+
+
+def build_css():
+    t = tokens()
+    return f"""
 <style>
-.block-container {padding-top: 2.2rem; padding-bottom: 3rem; max-width: 1320px;}
-[data-testid="stAppDeployButton"] {display: none;}
-h1, h2, h3 {letter-spacing: -0.015em;}
-[data-testid="stMetricLabel"] p {font-size: 0.82rem; opacity: 0.8; font-weight: 500;}
-[data-testid="stMetricValue"] {font-size: 1.6rem;}
-[data-testid="stCaptionContainer"] {opacity: 0.85;}
+/* Layout */
+.block-container {{padding-top: 2.5rem; padding-bottom: 4rem; max-width: 1240px;}}
+[data-testid="stAppDeployButton"] {{display: none;}}
+h1, h2, h3, h4, h5 {{letter-spacing: -0.015em; font-weight: 600;}}
+[data-testid="stMarkdownContainer"] h3 {{margin-top: 1.4rem;}}
+[data-testid="stCaptionContainer"] {{opacity: 1;}}
+[data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] p {{color: {t["muted"]};}}
+[data-testid="stMarkdownContainer"] code, [data-testid="stCaptionContainer"] code {{color: {t["text2"]} !important;
+  background: {t["subtle"]} !important; border-radius: 4px;
+  padding: 0.1em 0.35em;}}
 
-.pe-hero {
-  border-radius: 14px; padding: 22px 26px; margin-bottom: 18px;
-  background: linear-gradient(120deg, #1c5cab 0%, #2a78d6 55%, #6250d6 100%);
-  color: #ffffff;
-}
-.pe-hero .eyebrow {font-size: 0.75rem; letter-spacing: 0.12em; text-transform: uppercase; opacity: 0.85; font-weight: 600;}
-.pe-hero h1 {color: #ffffff; font-size: 1.85rem; margin: 4px 0 6px 0; padding: 0;}
-.pe-hero p {color: #ffffff; opacity: 0.92; margin: 0; font-size: 0.98rem; max-width: 860px;}
-.pe-hero .chips {margin-top: 12px; display: flex; flex-wrap: wrap; gap: 6px;}
-.pe-hero .chip {background: rgba(255,255,255,0.16); border: 1px solid rgba(255,255,255,0.28);
-  border-radius: 999px; padding: 2px 10px; font-size: 0.78rem; font-weight: 500;}
+/* KPI cards: number first, quiet label, hairline border, no fill */
+[data-testid="stMetric"] {{background: transparent;}}
+[data-testid="stMetricLabel"] p {{font-size: 0.78rem; color: {t["muted"]}; font-weight: 500;}}
+[data-testid="stMetricValue"] {{font-size: 1.6rem; font-weight: 600; letter-spacing: -0.02em;}}
+[data-testid="stVerticalBlockBorderWrapper"], [data-testid="stMetric"] {{box-shadow: none;}}
 
-.pe-page-title {margin: 0 0 2px 0;}
-.pe-page-sub {opacity: 0.75; margin: 0 0 14px 0; font-size: 0.97rem;}
+/* Primary buttons: text that stays readable on the accent in both themes */
+[data-testid="stBaseButton-primary"], [data-testid="stBaseButton-primary"] p,
+[data-testid="stBaseButton-primary"] [data-testid="stIconMaterial"] {{color: {t["on_accent"]} !important;}}
+[data-testid="stBaseButton-primary"] {{box-shadow: none;}}
 
-.pe-pill {display: inline-flex; align-items: center; gap: 6px; border-radius: 999px;
-  padding: 3px 12px; font-weight: 600; font-size: 0.85rem;}
-.pe-pill.critical {background: #d03b3b; color: #ffffff;}
-.pe-pill.watch {background: #fab219; color: #0b0b0b;}
-.pe-pill.healthy {background: #0ca30c; color: #ffffff;}
-.pe-pill.unknown {background: #898781; color: #ffffff;}
+/* Multiselect tags: neutral chips instead of filled accent */
+[data-testid="stMultiSelectTagsContainer"] [data-tag] {{background: transparent !important;
+  border: 1px solid {t["border"]}; color: {t["text"]} !important;}}
+[data-testid="stMultiSelectTagsContainer"] [data-tag] * {{color: {t["text"]} !important;}}
 
-.pe-verdict {border-radius: 12px; padding: 16px 18px; border: 1px solid rgba(128,128,128,0.25);}
-.pe-verdict .big {font-size: 2.6rem; font-weight: 700; line-height: 1.1; margin: 6px 0 2px 0;}
-.pe-verdict .small {opacity: 0.8; font-size: 0.9rem;}
+/* Alerts: no coloured fills - hairline border and a neutral surface */
+[data-testid="stAlertContainer"] {{background: transparent; border: 1px solid {t["border"]}; color: {t["text"]};}}
+[data-testid="stAlertContainer"] [data-testid="stIconMaterial"] {{color: {t["muted"]};}}
+[data-testid="stAlertContentError"] [data-testid="stIconMaterial"] {{color: {t["red"]};}}
 
-.pe-rule {display: flex; justify-content: space-between; gap: 10px; padding: 8px 0;
-  border-bottom: 1px solid rgba(128,128,128,0.18); font-size: 0.9rem;}
-.pe-rule:last-child {border-bottom: none;}
-.pe-rule .name {font-weight: 600;}
-.pe-rule .desc {opacity: 0.72; font-size: 0.8rem;}
-.pe-rule .val {text-align: right; white-space: nowrap;}
+/* Page intro (overview) */
+.pe-hero {{padding: 4px 0 22px 0; margin-bottom: 8px; border-bottom: 1px solid {t["border"]};}}
+.pe-hero .eyebrow {{font-size: 0.72rem; letter-spacing: 0.08em; text-transform: uppercase; color: {t["muted"]};
+  font-weight: 500;}}
+.pe-hero h1 {{font-size: 1.9rem; font-weight: 600; letter-spacing: -0.025em; margin: 6px 0 8px 0; padding: 0;}}
+.pe-hero p {{color: {t["text2"]}; margin: 0; font-size: 1rem; line-height: 1.55; max-width: 760px;}}
+.pe-hero .chips {{margin-top: 14px; display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 0.8rem;
+  color: {t["muted"]};}}
+.pe-hero .chip b {{color: {t["text"]}; font-weight: 500;}}
 
-.pe-side-brand {font-weight: 700; font-size: 1.15rem; letter-spacing: -0.01em;}
-.pe-side-sub {opacity: 0.7; font-size: 0.82rem; margin-bottom: 4px;}
+.pe-page-sub {{color: {t["text2"]}; margin: -4px 0 18px 0; font-size: 0.97rem; max-width: 760px;}}
 
-@media (max-width: 640px) {
-  .pe-hero {padding: 16px;}
-  .pe-hero h1 {font-size: 1.4rem;}
-  .pe-verdict .big {font-size: 2rem;}
-}
+/* Status labels: a small dot plus text - colour is never the only cue */
+.pe-pill {{display: inline-flex; align-items: center; gap: 7px; border-radius: 6px; padding: 2px 9px;
+  font-weight: 500; font-size: 0.82rem; border: 1px solid {t["border"]}; color: {t["text"]};
+  background: transparent; white-space: nowrap;}}
+.pe-pill .dot {{width: 7px; height: 7px; border-radius: 50%; display: inline-block;}}
+.pe-pill.critical {{border-color: {t["red"]}; color: {t["red"]};}}
+.pe-pill.critical .dot {{background: {t["red"]};}}
+.pe-pill.watch .dot {{background: {t["greys"][0]};}}
+.pe-pill.healthy .dot {{background: {t["green"]};}}
+.pe-pill.unknown .dot {{background: {t["greys"][1]};}}
+.pe-pills {{display: flex; flex-wrap: wrap; gap: 8px; margin: 2px 0 6px 0;}}
+
+.pe-verdict {{border-radius: 8px; padding: 16px 18px; border: 1px solid {t["border"]};}}
+.pe-verdict .big {{font-size: 2.6rem; font-weight: 600; letter-spacing: -0.03em; line-height: 1.1;
+  margin: 10px 0 4px 0;}}
+.pe-verdict .small {{color: {t["muted"]}; font-size: 0.86rem;}}
+
+.pe-rule {{display: flex; justify-content: space-between; gap: 12px; padding: 10px 0;
+  border-bottom: 1px solid {t["border"]}; font-size: 0.9rem;}}
+.pe-rule:last-child {{border-bottom: none;}}
+.pe-rule .name {{font-weight: 500;}}
+.pe-rule .desc {{color: {t["muted"]}; font-size: 0.8rem;}}
+.pe-rule .val {{text-align: right; white-space: nowrap; display: flex; flex-direction: column;
+  align-items: flex-end; gap: 4px;}}
+
+/* Sidebar */
+[data-testid="stSidebar"] {{border-right: 1px solid {t["border"]};}}
+[data-testid="stSidebarHeader"] {{height: 3.25rem; padding-bottom: 0;}}
+[data-testid="stSidebarNav"]::before {{
+  content: "ProphetEngine"; display: block; padding: 0 0 1.1rem 0; margin-top: -2.35rem;
+  font-weight: 600; font-size: 1rem; letter-spacing: -0.015em; color: {t["text"]};}}
+[data-testid="stSidebarNav"] {{padding-bottom: 0.5rem;}}
+[data-testid="stNavSectionHeader"] {{margin-top: 0.9rem; padding-bottom: 0.15rem;}}
+[data-testid="stNavSectionHeader"] p {{font-size: 0.7rem; font-weight: 500; letter-spacing: 0.08em;
+  text-transform: uppercase; color: {t["muted"]};}}
+[data-testid="stSidebarNavLink"] {{border-radius: 0; margin: 1px 0; padding-left: 0.85rem;
+  border-left: 2px solid transparent; background: transparent !important;}}
+[data-testid="stSidebarNavLink"] p {{color: {t["text2"]}; font-size: 0.9rem;}}
+[data-testid="stSidebarNavLink"] [data-testid="stIconMaterial"] {{color: {t["muted"]} !important;
+  font-size: 1.05rem;}}
+[data-testid="stSidebarNavLink"]:hover p {{color: {t["text"]};}}
+[data-testid="stSidebarNavLink"][aria-current="page"] {{border-left-color: {t["accent"]};}}
+[data-testid="stSidebarNavLink"][aria-current="page"] p {{color: {t["text"]}; font-weight: 600;}}
+[data-testid="stSidebarNavLink"][aria-current="page"] [data-testid="stIconMaterial"] {{color: {t["text"]} !important;}}
+[data-testid="stSidebarNavSeparator"] {{border-color: {t["border"]};}}
+.pe-side-label {{font-size: 0.7rem; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase;
+  color: {t["muted"]}; margin: 0.25rem 0 0.4rem 0;}}
+.pe-side-foot {{font-size: 0.75rem; color: {t["muted"]}; line-height: 1.6; padding-top: 0.75rem;
+  border-top: 1px solid {t["border"]};}}
+.pe-side-foot a {{color: {t["muted"]}; text-decoration: underline; text-underline-offset: 2px;}}
+[data-testid="stSidebarUserContent"] {{padding-top: 0.5rem;}}
+
+@media (max-width: 640px) {{
+  .block-container {{padding-top: 3.5rem;}}
+  .pe-hero h1 {{font-size: 1.45rem;}}
+  .pe-verdict .big {{font-size: 2rem;}}
+  [data-testid="stMetricValue"] {{font-size: 1.4rem;}}
+}}
 </style>
 """
 
 
 def inject_css():
-    st.markdown(CSS, unsafe_allow_html=True)
+    st.markdown(build_css(), unsafe_allow_html=True)
 
 
 # ---------------------------------------------------------------------------
@@ -221,7 +307,7 @@ def _on_model_change():
 def sidebar_controls():
     init_state()
     with st.sidebar:
-        st.markdown("**Decision settings**")
+        st.markdown('<div class="pe-side-label">Decision settings</div>', unsafe_allow_html=True)
         st.selectbox(
             "Model",
             C.MODEL_ORDER,
@@ -267,12 +353,11 @@ def page_header(title, subtitle):
 
 
 TIER_TEXT = {"critical": "At risk", "watch": "Watch", "healthy": "Healthy", "unknown": "Unavailable"}
-TIER_ICON = {"critical": "&#9888;", "watch": "&#9679;", "healthy": "&#10003;", "unknown": "?"}
 
 
 def status_pill(tier, text=None):
     label = text or TIER_TEXT[tier]
-    return f'<span class="pe-pill {tier}">{TIER_ICON[tier]} {html.escape(label)}</span>'
+    return f'<span class="pe-pill {tier}"><span class="dot"></span>{html.escape(label)}</span>'
 
 
 def verdict_card(probability, threshold, model_label):

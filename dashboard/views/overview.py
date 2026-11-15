@@ -52,11 +52,11 @@ def render():
     tiers = S.risk_tiers(probabilities, threshold)
     counts = {t: int((tiers == t).sum()) for t in ("healthy", "watch", "critical")}
     st.markdown(
-        " &nbsp; ".join([
+        '<div class="pe-pills">' + "".join([
             ui.status_pill("critical", f"At risk: {counts['critical']:,}"),
             ui.status_pill("watch", f"Watch: {counts['watch']:,}"),
             ui.status_pill("healthy", f"Healthy: {counts['healthy']:,}"),
-        ]),
+        ]) + "</div>",
         unsafe_allow_html=True,
     )
     st.caption(f"At risk = probability at or above {threshold:.2f}. Watch = at least half the threshold "
@@ -67,7 +67,7 @@ def render():
     with left:
         charts.show(charts.risk_histogram(probabilities, y, threshold), key="risk_hist")
         st.caption("Red bars to the right of the dotted line are failures the model catches; red bars to the left "
-                   "are misses. Blue bars to the right are false alarms.")
+                   "are misses. Grey bars to the right are false alarms.")
     with right:
         modes = S.recall_by_failure_mode(validation, probabilities, threshold)
         if modes.empty:
