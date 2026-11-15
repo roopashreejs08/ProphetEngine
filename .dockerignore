@@ -1,0 +1,13 @@
+.venv
+.git
+.vercel
+__pycache__
+.pytest_cache
+.ruff_cache
+tests
+notebooks
+report
+docs
+data/live/stream.csv
+.env
+.env.*

@@ -174,6 +174,23 @@ python -m pytest
 
 The app needs no secrets. `requirements.txt` pins `scikit-learn==1.8.0`, the version the saved models were trained with.
 
+### Deploy on Vercel
+
+Live demo: https://prophetengine-dashboard.vercel.app
+
+Vercel runs the dashboard as a container image built from `Dockerfile.vercel` (Container Runtime, which keeps
+Streamlit's WebSocket open). With the [Vercel CLI](https://vercel.com/docs/cli), from the repository root:
+
+```bash
+vercel link                                        # once: create or pick a project
+vercel project update --framework container --yes  # once: use the Container preset
+vercel deploy                                      # preview deployment
+vercel deploy --prod                               # production
+```
+
+Instances scale to zero after 5 minutes without traffic, so the first visit after a quiet period takes a few
+seconds longer. Files written at runtime (such as the Live monitor's demo feed) are not kept between instances.
+
 ## Conclusion
 
 The experiments show that Random Forest achieved the highest validation accuracy at 97.90% and the highest Average Precision at 0.7727. Lowering its classification threshold to 0.23 improved failure detection recall to 73.53%, with a corresponding decrease in accuracy to 97.45%.

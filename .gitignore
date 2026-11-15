@@ -16,3 +16,7 @@ data/ai4i/*.csv
 
 # Dashboard: local live-feed file written by the Live monitor demo
 data/live/stream.csv
+
+# Vercel CLI project link
+.vercel/
+.env.local
