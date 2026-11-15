@@ -1,10 +1,42 @@
+# ProphetEngine dashboard theme.
+# Light and dark variants share one palette; viewers switch between them from
+# the app menu (top right) -> Settings -> Theme. Dark is the default.
+
 [theme]
 base = "dark"
-primaryColor = "#F5A623"
-backgroundColor = "#0F1419"
-secondaryBackgroundColor = "#171D25"
-textColor = "#E6EAF0"
-font = "sans serif"
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap, sans-serif"
+headingFont = "Inter, sans-serif"
+codeFont = "monospace"
+baseRadius = "medium"
+buttonRadius = "medium"
+showSidebarBorder = true
+headingFontWeights = [700, 600, 600, 600, 600, 600]
+headingFontSizes = ["2.1rem", "1.45rem", "1.15rem", "1rem", "0.95rem", "0.9rem"]
+metricValueFontWeight = 650
+
+[theme.light]
+primaryColor = "#2a78d6"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f3f5f8"
+textColor = "#14171f"
+borderColor = "#e1e4ea"
+linkColor = "#1c5cab"
+chartCategoricalColors = ["#2a78d6", "#eb6834", "#1baf7a", "#6250d6", "#e87ba4", "#008300", "#eda100", "#e34948"]
+
+[theme.light.sidebar]
+backgroundColor = "#f6f7f9"
+
+[theme.dark]
+primaryColor = "#3987e5"
+backgroundColor = "#0e1117"
+secondaryBackgroundColor = "#1a1f29"
+textColor = "#e8eaf0"
+borderColor = "#2a303c"
+linkColor = "#86b6ef"
+chartCategoricalColors = ["#3987e5", "#d95926", "#199e70", "#9085e9", "#d55181", "#008300", "#c98500", "#e66767"]
+
+[theme.dark.sidebar]
+backgroundColor = "#12161e"
 
 [server]
 headless = true
