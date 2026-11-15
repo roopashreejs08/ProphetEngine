@@ -90,7 +90,7 @@ source venv/bin/activate
 Install the required dependencies:
 
 ```bash
-python -m pip install numpy pandas scikit-learn matplotlib seaborn joblib
+python -m pip install -r requirements.txt
 ```
 
 Run the model comparison:
@@ -104,6 +104,75 @@ Run Random Forest threshold tuning:
 ```bash
 python src/models/tune_random_forest.py
 ```
+
+## Dashboard
+
+An interactive Streamlit dashboard runs the trained models live. Every number it shows is loaded or recomputed from the files in this repository (`results/*.joblib`, `results/*.csv`, `data/processed/`).
+
+![Overview page](docs/screenshots/overview.png)
+
+### Run it locally
+
+```bash
+python -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+Then open http://localhost:8501. Use the menu (top right) -> Settings to switch between dark and light themes.
+
+### Pages
+
+| Page | What it does |
+|---|---|
+| **Overview** | Headline results and fleet health for the 2,000 validation machines at the chosen model and alert threshold; failures caught by failure type; riskiest machines. |
+| **Live monitor** | Streams readings one per second through all models: replay of real validation machines (with known outcomes), a simulated machine with fault injection, or an external feed (`data/live/stream.csv`, see `data/live/README.md`). |
+| **What-if predictor** | Set the five sensors and machine type and see every model's failure probability instantly, what drives it, the dataset's documented failure rules, and sensitivity curves / a speed x torque risk map. |
+| **Batch scoring** | Upload a CSV (raw AI4I, processed split or live-feed format), get it validated and scored, and download a risk-ranked worklist. Shows accuracy when labels are present. |
+| **Performance** | Saved metrics plus the tuned Random Forest, threshold explorer with a cost model, precision-recall / ROC / calibration curves and recall per failure type. |
+| **Explainability** | Saved feature importance, permutation importance computed on the validation set, and partial-dependence curves for all three models. |
+| **Data explorer** | Filter AI4I by split, type, outcome, failure type and sensor ranges; distributions, relationships, summary statistics and CSV download. Also shows the prepared NASA C-MAPSS engine data. |
+| **About & method** | Problem, data, models, leakage prevention, limitations and team. |
+
+The model and alert threshold in the sidebar apply to every page. The default is the team's recommended setup: Random Forest with the tuned 0.23 threshold.
+
+| | |
+|---|---|
+| ![Live monitor](docs/screenshots/live-monitor.png) | ![What-if predictor (light theme)](docs/screenshots/what-if-light.png) |
+| ![Performance](docs/screenshots/performance.png) | ![Explainability](docs/screenshots/explainability.png) |
+
+### Code layout
+
+```text
+app.py                     # entry point: page config + navigation
+.streamlit/config.toml     # light and dark theme
+dashboard/
+├── config.py              # paths, feature names, model registry, colours
+├── data.py                # loaders, upload validation, live-feed parsing (no Streamlit)
+├── scoring.py             # metrics, threshold sweeps, explanations (no Streamlit)
+├── simulator.py           # synthetic machine for the Live monitor
+├── charts.py              # Plotly figures
+├── ui.py                  # cached loaders, sidebar controls, shared components
+└── views/                 # one module per page
+tests/                     # pytest: helper unit tests + every page renders
+```
+
+### Tests
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest
+```
+
+### Deploy to Streamlit Community Cloud
+
+1. Go to https://share.streamlit.io and sign in with GitHub.
+2. Click **Create app** -> **Deploy a public app from GitHub**.
+3. Repository `roopashreejs08/ProphetEngine`, branch `main`, main file path `app.py`.
+4. Under **Advanced settings**, choose Python 3.12, then **Deploy**.
+
+The app needs no secrets. `requirements.txt` pins `scikit-learn==1.8.0`, the version the saved models were trained with.
 
 ## Conclusion
 
